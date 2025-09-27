@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  servicebus:
+    image: microsoft/azure-messaging-servicebus-emulator
+    container_name: rate-lock-servicebus
+    environment:
+      SERVICEBUS_CONNECTION_STRING: Endpoint=sb://{your-servicebus-namespace}.servicebus.windows.net/;SharedAccessKeyName={your-key-name};SharedAccessKey={your-key}
+    ports:
+      - "5432:5432"
+    volumes:
+      - servicebus-data:/var/lib/servicebus
+    networks:
+      - rate-lock-network
+
+  cosmosdb:
+      image: mcr.microsoft.com/azure-cosmos-db-emulator
+      container_name: rate-lock-cosmosdb
+      ports:
+        - "8081:8081"
+      volumes:
+        - cosmosdb-data:/var/lib/cosmosdb
+      networks:
+        - rate-lock-network
+
+volumes:
+  servicebus-data:
+  cosmosdb-data:
+networks:
+  rate-lock-network:
+    driver: bridge

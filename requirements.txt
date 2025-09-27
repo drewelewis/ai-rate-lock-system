@@ -1,0 +1,10 @@
+fastapi
+pypdf
+semantic-kernel
+openai
+tiktoken
+azure-search-documents
+azure-identity
+python-dotenv
+requests
+termcolor
