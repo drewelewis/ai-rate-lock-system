@@ -320,8 +320,8 @@ graph TD
 - **Azure Container Apps**: Deployment platform (monolithic architecture)
 - **Azure Service Bus**: Message queuing and agent coordination
 - **Azure Cosmos DB**: Primary data storage for rate lock records
-- **Azure Redis**: Agent memory and context storage
 - **Azure Application Insights**: Logging and monitoring
+- **Redis**: *(Optional)* Agent memory and caching for high-volume scenarios
 
 ## Storage Architecture
 
@@ -415,7 +415,9 @@ The system employs a three-tier storage strategy, each optimized for specific da
 
 ---
 
-### **⚡ Redis - Agent Memory & Caching**
+### **⚡ Redis - Agent Memory & Caching (Optional)**
+
+> **Note**: Redis is optional for initial implementation. Consider adding it when processing volume exceeds 5,000 requests/week or when sub-second response times become critical.
 
 **Primary Use Cases:**
 - **Agent State Management**: Short-term memory for active agent processes
@@ -423,6 +425,13 @@ The system employs a three-tier storage strategy, each optimized for specific da
 - **Rate Limiting**: Controlling API call frequency to external services
 - **Performance Optimization**: Caching frequently accessed reference data
 - **Real-time Coordination**: Agent-to-agent communication for complex workflows
+
+**When to Add Redis:**
+- ✅ Processing volume > 5,000 requests/week
+- ✅ Need sub-second agent response times
+- ✅ Complex multi-agent workflows requiring shared state
+- ✅ Heavy external API usage requiring rate limiting
+- ✅ Frequently accessed reference data (rate tables, compliance rules)
 
 **Why Redis:**
 - ✅ **In-Memory Performance**: Sub-millisecond data access for real-time agent decisions
@@ -453,8 +462,14 @@ workflow:{loanId}:progress    # Real-time workflow status
 ```
 
 **Deployment Strategy:**
-- **Development**: Local Docker container with persistence
-- **Production**: Azure Cache for Redis with clustering and backup
+- **Development**: Add Redis when needed with `docker-compose up redis`
+- **Production**: Azure Cache for Redis when volume justifies the cost
+
+**Alternative Implementations (without Redis):**
+- **Agent State**: Store in Cosmos DB with TTL for temporary data
+- **Caching**: Use in-memory Python dictionaries with periodic refresh
+- **Rate Limiting**: Implement with Cosmos DB timestamp queries
+- **Coordination**: Use Service Bus message attributes for workflow state
 
 **Potential Alternatives:**
 - **Memcached**: Simpler but lacks data structure variety
@@ -537,7 +552,391 @@ This multi-tier storage architecture provides:
 
 ## Getting Started
 
-*(Implementation details to be added as development progresses)*
+This section provides step-by-step instructions for setting up the Azure infrastructure required to run the AI Rate Lock System. The system uses Azure Developer CLI (azd) and Bicep templates for infrastructure deployment.
+
+### Prerequisites
+
+Before setting up the infrastructure, ensure you have the following tools installed and configured:
+
+#### 1. **Azure CLI**
+
+The Azure CLI is required for authentication and managing Azure resources.
+
+**Installation:**
+- **Windows**: Download from [Azure CLI for Windows](https://aka.ms/installazurecliwindows) or use:
+  ```cmd
+  winget install -e --id Microsoft.AzureCLI
+  ```
+- **macOS**: 
+  ```bash
+  brew install azure-cli
+  ```
+- **Linux**: 
+  ```bash
+  curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+  ```
+
+**Verification:**
+```bash
+az --version
+```
+
+#### 2. **Azure Developer CLI (azd)**
+
+Azure Developer CLI simplifies the process of developing and deploying applications to Azure.
+
+**Installation:**
+- **Windows**: 
+  ```cmd
+  winget install microsoft.azd
+  ```
+- **macOS**: 
+  ```bash
+  brew tap azure/azd && brew install azd
+  ```
+- **Linux**: 
+  ```bash
+  curl -fsSL https://aka.ms/install-azd.sh | bash
+  ```
+
+**Verification:**
+```bash
+azd version
+```
+
+**Note**: The minimum supported version is 1.11.0. If you have an older version, update using:
+```cmd
+# Windows
+winget upgrade Microsoft.Azd
+
+# macOS
+brew upgrade azd
+
+# Linux
+curl -fsSL https://aka.ms/install-azd.sh | bash
+```
+
+#### 3. **Python Environment**
+
+The system requires Python 3.8 or higher with specific packages.
+
+**Installation:**
+- Download Python from [python.org](https://www.python.org/downloads/)
+- Ensure pip is installed and updated:
+  ```bash
+  python -m pip install --upgrade pip
+  ```
+
+**Install Required Packages:**
+```bash
+pip install -r requirements.txt
+```
+
+Key dependencies include:
+- `python-dotenv`: For environment variable management
+- `azure-identity`: For Azure authentication
+- `azure-cosmos`: For Cosmos DB operations
+- `azure-servicebus`: For Service Bus messaging
+
+#### 4. **Git**
+
+Git is required to clone and manage the repository.
+
+**Installation:**
+- **Windows**: Download from [git-scm.com](https://git-scm.com/download/win)
+- **macOS**: 
+  ```bash
+  brew install git
+  ```
+- **Linux**: 
+  ```bash
+  sudo apt install git  # Ubuntu/Debian
+  sudo yum install git  # RHEL/CentOS
+  ```
+
+### Infrastructure Setup Process
+
+#### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/drewelewis/ai-rate-lock-system.git
+cd ai-rate-lock-system
+```
+
+#### Step 2: Authenticate with Azure
+
+**Login to Azure CLI:**
+```bash
+az login
+```
+This opens a browser window for authentication. Follow the prompts to sign in with your Azure account.
+
+**Set your subscription (if you have multiple):**
+```bash
+az account list --output table
+az account set --subscription "your-subscription-name-or-id"
+```
+
+**Login to Azure Developer CLI:**
+```bash
+azd auth login
+```
+This may open another browser window for azd-specific authentication.
+
+#### Step 3: Configure Environment Variables
+
+Set the Azure region where you want to deploy resources:
+
+```bash
+# Set your preferred Azure region
+azd env set AZURE_LOCATION eastus2
+
+# The system will automatically detect your subscription ID
+# But you can also set it manually if needed:
+azd env set AZURE_SUBSCRIPTION_ID "your-subscription-id"
+```
+
+**Available Azure Regions for OpenAI:**
+- `eastus` - East US
+- `eastus2` - East US 2  
+- `westus` - West US
+- `westus2` - West US 2
+- `centralus` - Central US
+- `northcentralus` - North Central US
+- `southcentralus` - South Central US
+
+**Note**: Choose a region that supports Azure OpenAI services. East US 2 is recommended for optimal performance and service availability.
+
+#### Step 4: Initialize the Azure Developer Project
+
+```bash
+azd init
+```
+
+When prompted:
+- **Environment name**: Use `ai-rate-lock-dev` (or your preferred name)
+- **Template**: The system will detect the existing azure.yaml configuration
+
+#### Step 5: Deploy the Infrastructure
+
+Deploy all Azure resources with a single command:
+
+```bash
+azd provision
+```
+
+This command will:
+1. **Create a Resource Group** named `rg-{environment-name}` in your specified region
+2. **Deploy Azure OpenAI** with GPT-4o and text-embedding-3-small models
+3. **Deploy Azure Cosmos DB** with optimized containers:
+   - `RateLockRecords` - Main loan data (partitioned by `/loanApplicationId`)
+   - `AuditLogs` - System audit trails (partitioned by `/auditDate`)
+   - `Configuration` - System settings (partitioned by `/configType`)
+   - `Exceptions` - Error handling records (partitioned by `/priority`)
+4. **Deploy Azure Service Bus** with topics and subscriptions:
+   - `workflow-events` topic with 6 agent-specific subscriptions
+   - `audit-events` topic with 1 audit subscription  
+   - `exception-alerts` topic with 1 exception handling subscription
+5. **Deploy Application Insights** for monitoring and telemetry
+6. **Deploy Log Analytics Workspace** for centralized logging
+
+**Deployment Progress:**
+The deployment typically takes 3-5 minutes. You'll see progress indicators for each resource:
+```
+✓ Done: Azure OpenAI (18s)
+✓ Done: Azure Cosmos DB (1m24s)  
+✓ Done: Service Bus Namespace (1m32s)
+✓ Done: Application Insights (22s)
+✓ Done: Log Analytics workspace (20s)
+```
+
+#### Step 6: Configure Environment Variables
+
+After successful deployment, set up your local environment:
+
+```bash
+azd env get-values > .env
+```
+
+This creates a `.env` file with all necessary connection strings and endpoints:
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_COSMOS_ENDPOINT`  
+- `AZURE_SERVICE_BUS_ENDPOINT`
+- `APPLICATIONINSIGHTS_CONNECTION_STRING`
+- And other required configuration values
+
+#### Step 7: Verify Deployment
+
+Test that all services are properly configured:
+
+```bash
+python test_deployment.py
+```
+
+**Expected Output:**
+```
+🔧 Loading environment variables...
+
+📋 Azure Configuration Summary
+==================================================
+Environment: development
+OpenAI: ✅
+Cosmos DB: ✅
+Service Bus: ✅
+Redis: ⚪ (optional)
+
+🎯 All required configuration present!
+
+✅ All services configured correctly!
+🚀 Ready to start developing with Azure services!
+```
+
+### Understanding the Infrastructure Components
+
+#### **Bicep Infrastructure as Code**
+
+The system uses Bicep templates for reproducible infrastructure deployment:
+
+- **`infra/main.bicep`**: Main template orchestrating all resources
+- **`infra/core/ai/openai.bicep`**: Azure OpenAI configuration with model deployments
+- **`infra/core/database/cosmos.bicep`**: Cosmos DB with optimized partitioning
+- **`infra/core/messaging/servicebus.bicep`**: Service Bus topics and subscriptions
+- **`infra/core/monitor/monitoring.bicep`**: Application Insights and Log Analytics
+- **`infra/main.bicepparam`**: Environment-specific parameters
+
+#### **Service Bus Architecture**
+
+The messaging infrastructure supports the multi-agent workflow:
+
+**Topics:**
+1. **`workflow-events`** - Main agent coordination
+   - Email intake notifications
+   - Loan context updates
+   - Rate quote requests
+   - Compliance status changes
+   - Lock confirmations
+   - Audit logging triggers
+
+2. **`audit-events`** - System audit trail
+   - All agent actions
+   - Data modifications
+   - Error conditions
+
+3. **`exception-alerts`** - Error handling
+   - Human intervention required
+   - System failures
+   - Compliance violations
+
+**Subscriptions:**
+Each agent has dedicated subscriptions with filters to receive only relevant messages.
+
+#### **Cosmos DB Partitioning Strategy**
+
+Optimized for the mortgage workflow access patterns:
+
+1. **RateLockRecords** (`/loanApplicationId`)
+   - Primary data partition by loan ID
+   - Enables efficient single-loan queries
+   - Supports loan lifecycle tracking
+
+2. **AuditLogs** (`/auditDate`)  
+   - Time-based partitioning for audit queries
+   - Efficient date range filtering
+   - Compliance reporting optimization
+
+3. **Configuration** (`/configType`)
+   - Partitioned by configuration category
+   - Agent settings, business rules, rate tables
+   - Fast configuration lookups
+
+4. **Exceptions** (`/priority`)
+   - Priority-based partitioning (high/medium/low)
+   - Enables efficient priority queue operations
+   - Human workqueue optimization
+
+### Troubleshooting Common Issues
+
+#### **Authentication Problems**
+```bash
+# Clear cached credentials
+az logout
+azd auth logout
+
+# Re-authenticate
+az login
+azd auth login
+```
+
+#### **Deployment Failures**
+```bash
+# Check deployment logs
+azd provision --debug
+
+# Clean up failed deployment
+azd down --purge
+azd provision
+```
+
+#### **Environment Variable Issues**
+```bash
+# Regenerate environment file
+azd env get-values > .env
+
+# Verify configuration
+python -c "from dotenv import load_dotenv; load_dotenv(); from config.azure_config import azure_config; print(azure_config.get_configuration_summary())"
+```
+
+#### **Resource Quotas**
+If deployment fails due to quota limits:
+1. Check your subscription quotas in the Azure portal
+2. Request quota increases if needed
+3. Choose a different region with available capacity
+
+#### **Service Bus Lock Duration Errors**
+The Standard tier Service Bus has a maximum lock duration of 5 minutes. The templates are configured correctly, but if you modify them, ensure lock durations don't exceed `PT5M`.
+
+#### **Cosmos DB Indexing Errors**
+All containers require the `"/*"` path in their indexing policy. The templates include this, but custom modifications should preserve this requirement.
+
+### Cost Management
+
+**Expected Monthly Costs (Development Environment):**
+- Azure OpenAI: ~$20-50 (based on usage)
+- Cosmos DB: ~$25-40 (serverless tier)
+- Service Bus: ~$10-20 (Standard tier)
+- Application Insights: ~$5-15
+- Log Analytics: ~$5-10
+
+**Total: Approximately $65-135/month**
+
+**Cost Optimization Tips:**
+- Use serverless Cosmos DB for development
+- Monitor OpenAI token usage
+- Set up budget alerts in Azure
+- Clean up resources when not in use: `azd down`
+
+### Security Considerations
+
+The infrastructure implements several security best practices:
+
+1. **Managed Identity**: Services authenticate using managed identities
+2. **Private Endpoints**: Can be enabled for production environments
+3. **Key Vault Integration**: Secrets stored securely (optional)
+4. **Role-Based Access Control**: Minimum required permissions
+5. **Network Security**: Configurable IP restrictions
+
+### Next Steps
+
+After successful infrastructure deployment:
+
+1. **Install Python Dependencies**: `pip install -r requirements.txt`
+2. **Review Agent Code**: Explore the `agents/` directory
+3. **Test Individual Agents**: Use the test scripts in each agent folder
+4. **Configure Email Integration**: Set up email monitoring
+5. **Connect to Loan Origination System**: Configure LOS integration
+6. **Set Up Monitoring**: Configure Application Insights dashboards
+
+The infrastructure is now ready for development and testing of your AI Rate Lock System!
 
 ## Contributing
 

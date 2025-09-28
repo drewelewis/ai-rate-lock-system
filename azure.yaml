@@ -1,0 +1,17 @@
+name: ai-rate-lock-system
+metadata:
+  template: ai-rate-lock-system@0.0.1-beta
+
+# Remove services for now - will add containerization later
+# services:
+#   api:
+#     project: ./
+#     language: python
+#     host: containerapp
+
+hooks:
+  postprovision:
+    - shell: pwsh
+      run: |
+        Write-Host "Setting up environment variables..."
+        azd env get-values | Out-File -FilePath .env -Encoding utf8
