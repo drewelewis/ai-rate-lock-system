@@ -323,6 +323,178 @@ graph TD
 - **Azure Redis**: Agent memory and context storage
 - **Azure Application Insights**: Logging and monitoring
 
+## Storage Architecture
+
+The system employs a three-tier storage strategy, each optimized for specific data patterns and access requirements:
+
+### **🗃️ Azure Cosmos DB - Primary Data Storage**
+
+**Primary Use Cases:**
+- **Loan Lock Records**: Complete rate lock entities with full lifecycle state
+- **Application Context**: Loan origination system data and borrower information  
+- **Rate Lock History**: Historical records for audit and analytics
+- **Configuration Data**: Agent settings, business rules, and system parameters
+
+**Why Cosmos DB:**
+- ✅ **Global Distribution**: Multi-region replication for high availability
+- ✅ **Flexible Schema**: JSON documents adapt to evolving loan lock data structures
+- ✅ **Automatic Scaling**: Handles variable workloads (1000+ requests/week with peaks)
+- ✅ **ACID Transactions**: Ensures data consistency for critical financial operations
+- ✅ **Multiple APIs**: SQL API for complex queries, perfect for loan data relationships
+- ✅ **99.999% SLA**: Mission-critical uptime for mortgage processing
+
+**Data Partitioning Strategy:**
+```json
+{
+  "partitionKey": "/loanApplicationId",
+  "indexingPolicy": {
+    "includedPaths": [
+      "/borrower/email/?",
+      "/lockDetails/status/?", 
+      "/audit/lastModified/?",
+      "/compliance/riskLevel/?"
+    ]
+  }
+}
+```
+
+**Container Structure:**
+- **RateLockRecords**: Main loan lock entities (partitioned by loan application ID)
+- **AuditLogs**: Immutable audit trail (partitioned by date)
+- **AgentConfiguration**: System configuration and business rules
+- **ExceptionTracking**: Human escalation cases and resolution tracking
+
+**Potential Alternatives:**
+- **Azure SQL Database**: Better for complex relational queries but less flexible schema
+- **Azure Table Storage**: Lower cost but limited querying capabilities
+- **MongoDB Atlas**: Similar NoSQL capabilities but requires additional vendor management
+- **PostgreSQL**: Strong JSON support but requires more infrastructure management
+
+---
+
+### **📨 Azure Service Bus - Message Queuing**
+
+**Primary Use Cases:**
+- **Agent Coordination**: Triggering sequential agent workflows
+- **Event-Driven Processing**: State change notifications between agents
+- **Load Balancing**: Distributing work across multiple agent instances
+- **Dead Letter Handling**: Managing failed message processing
+- **Scheduled Operations**: Time-based triggers for rate expiration monitoring
+
+**Why Service Bus:**
+- ✅ **Enterprise Messaging**: Built for high-volume, mission-critical messaging
+- ✅ **Message Ordering**: FIFO queues ensure proper processing sequence
+- ✅ **Dead Letter Queues**: Automatic handling of failed messages
+- ✅ **Topics & Subscriptions**: Publish-subscribe for broadcast notifications
+- ✅ **Message Sessions**: Grouped processing for related loan applications
+- ✅ **Duplicate Detection**: Prevents duplicate processing of rate lock requests
+- ✅ **Integration**: Native Azure ecosystem integration
+
+**Queue Architecture:**
+```
+📨 new-requests          → EmailIntakeAgent
+📨 context-retrieved     → RateQuoteAgent  
+📨 rates-presented       → ComplianceRiskAgent
+📨 compliance-passed     → LockConfirmationAgent
+📨 exceptions            → ExceptionHandlerAgent
+📨 audit-events          → AuditLoggingAgent (Topic)
+```
+
+**Message Flow Patterns:**
+- **Sequential Processing**: Point-to-point queues for workflow progression
+- **Broadcast Events**: Topics for audit logging and monitoring
+- **Error Handling**: Dead letter queues for failed processing
+- **Priority Processing**: Separate queues for urgent vs. standard requests
+
+**Potential Alternatives:**
+- **RabbitMQ**: Open-source alternative but requires self-management
+- **Apache Kafka**: Better for high-throughput streaming but overkill for this use case
+- **Azure Event Hubs**: Better for event streaming but lacks message queuing features
+- **AWS SQS**: Similar capabilities but requires multi-cloud management
+- **Redis Pub/Sub**: Simpler but lacks persistence and delivery guarantees
+
+---
+
+### **⚡ Redis - Agent Memory & Caching**
+
+**Primary Use Cases:**
+- **Agent State Management**: Short-term memory for active agent processes
+- **Session Caching**: Temporary storage for multi-step agent workflows  
+- **Rate Limiting**: Controlling API call frequency to external services
+- **Performance Optimization**: Caching frequently accessed reference data
+- **Real-time Coordination**: Agent-to-agent communication for complex workflows
+
+**Why Redis:**
+- ✅ **In-Memory Performance**: Sub-millisecond data access for real-time agent decisions
+- ✅ **Rich Data Structures**: Lists, sets, and hashes for complex agent state
+- ✅ **Pub/Sub Messaging**: Real-time notifications between agent instances
+- ✅ **TTL Support**: Automatic expiration for temporary data
+- ✅ **Atomic Operations**: Thread-safe operations for concurrent agent access
+- ✅ **Persistence Options**: Configurable durability for important cached data
+- ✅ **Lightweight**: Minimal resource overhead for containerized deployment
+
+**Data Storage Patterns:**
+```redis
+# Agent working memory
+agent:{agentId}:state          # Current agent processing state
+agent:{agentId}:context        # Temporary processing context
+
+# Rate limiting
+ratelimit:{service}:{minute}   # API call counters with TTL
+
+# Shared caches  
+cache:loan_products           # Frequently accessed loan product data
+cache:rate_rules              # Business rules for rate calculations
+cache:compliance_templates    # Document templates
+
+# Inter-agent coordination
+workflow:{loanId}:locks       # Processing locks to prevent conflicts
+workflow:{loanId}:progress    # Real-time workflow status
+```
+
+**Deployment Strategy:**
+- **Development**: Local Docker container with persistence
+- **Production**: Azure Cache for Redis with clustering and backup
+
+**Potential Alternatives:**
+- **Memcached**: Simpler but lacks data structure variety
+- **Azure Cache for Redis**: Fully managed but higher cost than self-hosted
+- **In-Memory SQLite**: Lighter weight but limited concurrent access
+- **Hazelcast**: Distributed caching but more complex setup
+- **Apache Ignite**: Full-featured but overkill for this use case
+
+---
+
+### **🔄 Storage Integration Patterns**
+
+**Data Flow Lifecycle:**
+1. **Message Reception** (Service Bus) → **Agent Activation** (Redis State) → **Data Persistence** (Cosmos DB)
+2. **Background Processing** → **Cache Updates** (Redis) → **State Changes** (Cosmos DB) → **Event Publishing** (Service Bus)
+3. **Exception Handling** → **Error Logging** (Cosmos DB) → **Alert Queuing** (Service Bus) → **Human Notification**
+
+**Consistency Strategy:**
+- **Eventual Consistency**: Between Redis cache and Cosmos DB for performance
+- **Strong Consistency**: Within Cosmos DB transactions for critical loan operations
+- **At-Least-Once Delivery**: Service Bus guarantees with idempotent agent operations
+
+**Backup and Recovery:**
+- **Cosmos DB**: Automatic continuous backup with point-in-time restore
+- **Service Bus**: Message persistence with configurable retention
+- **Redis**: Configurable persistence (RDB + AOF) for development environment
+
+**Monitoring and Observability:**
+- **Cosmos DB**: Built-in metrics for RU consumption, latency, and availability
+- **Service Bus**: Message metrics, dead letter monitoring, and processing rates  
+- **Redis**: Memory usage, connection counts, and cache hit ratios
+- **Cross-Service**: Azure Application Insights for distributed tracing
+
+This multi-tier storage architecture provides:
+- 🎯 **Optimal Performance**: Right tool for each data access pattern
+- 💰 **Cost Efficiency**: Tiered storage costs based on access frequency  
+- 🔒 **Data Safety**: Multiple levels of persistence and backup
+- 📊 **Observability**: Comprehensive monitoring across all storage layers
+- 🚀 **Scalability**: Each tier scales independently based on demand
+
 ## Project Structure
 
 ```
