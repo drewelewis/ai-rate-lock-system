@@ -60,49 +60,28 @@ To make the system more robust and scalable, email interactions are handled by A
     2. Uses the Office 365 connector to send the email.
   - **Purpose**: Allows any agent to send an email by simply placing a structured message on the Service Bus, without needing to handle SMTP or email APIs.
 
-### Deploying and Configuring the Infrastructure
+### Benefits of Service Bus for Agent Communication
 
-The infrastructure, including the Logic App workflows, is defined in Bicep files and can be deployed using the Azure Developer CLI (`azd`).
+Using Azure Service Bus as the backbone for communication between agents, rather than relying on in-process memory, provides several significant advantages that are critical for an enterprise-grade system:
 
-**Step 1: Provision the Infrastructure**
+- **Decoupling and Modularity**: Agents do not need direct knowledge of one another. An agent's only responsibility is to publish a message to a topic or listen for messages on a subscription. This loose coupling means individual agents can be updated, replaced, or tested independently without affecting the rest of the system.
 
-The Bicep files in the `infra` directory define all the necessary Azure resources. The `main.bicep` file creates API Connection resources for both Office 365 and Service Bus.
+- **Scalability**: Service Bus allows for competing consumers. If the volume of rate lock requests increases, you can scale out the system by running multiple instances of a specific agent (e.g., the `RateQuoteAgent`). Service Bus automatically distributes the message load across the available agent instances, enabling parallel processing. This is not possible with a single in-memory queue.
 
-To deploy the infrastructure, run the following command:
+- **Reliability and Durability**: Messages sent to Service Bus are persisted to durable storage. If an agent process crashes midway through handling a task, the message is not lost. It remains safely in the queue and can be re-processed once the agent restarts or by another instance. In-memory data, by contrast, would be lost permanently.
 
-```bash
-azd up
-```
+- **Asynchronous Operations**: Agents can publish events or commands to the bus and immediately move on to their next task without waiting for a response. This non-blocking, asynchronous workflow improves the overall throughput and responsiveness of the system, as agents spend less time idle.
 
-This command will:
-1.  Create a resource group.
-2.  Provision all the resources defined in the `infra` directory, including the API Connections and Logic Apps.
+- **Advanced Messaging Features**: Service Bus provides sophisticated, out-of-the-box features that are complex to build and maintain manually:
+  - **Topics and Subscriptions**: Allows for publish-subscribe patterns where one message can be delivered to multiple interested agents.
+  - **Dead-Lettering**: Automatically isolates messages that repeatedly fail processing, preventing them from blocking the queue and allowing for later inspection and manual intervention.
+  - **Message Ordering and Sessions**: Guarantees that related messages are processed in the correct sequence.
 
-**Step 2: Authorize the API Connections (Manual, One-Time Setup)**
+- **Resilience and Load Leveling**: If a downstream agent is slow or temporarily unavailable, messages simply accumulate in the Service Bus queue. This prevents the upstream agents from being blocked or failing and ensures that work is not lost during transient faults. The queue acts as a buffer that smooths out processing loads.
 
-For security reasons, the Bicep deployment only creates the API Connection *placeholders*. You must manually authorize them to grant the Logic Apps access to your resources.
+- **Observability**: Service Bus integrates seamlessly with Azure Monitor, providing detailed metrics on message throughput, queue lengths, and processing times. This makes it easier to monitor the health of the system, diagnose bottlenecks, and set up alerts for operational issues.
 
-1.  Navigate to the resource group created by `azd` in the Azure Portal.
-2.  Find the **API Connections**:
-    -   `office365`: This is the connection for Office 365.
-    -   `servicebus`: This is the connection for the Service Bus.
-3.  **Authorize the Office 365 Connection**:
-    -   Click on the `office365` API Connection.
-    -   You will see a banner indicating that the connection needs to be authorized.
-    -   Click **"Authorize"**, sign in with the email account you want the Logic App to use, and save the connection.
-4.  **Authorize the Service Bus Connection**:
-    -   Click on the `servicebus` API Connection.
-    -   Follow the same authorization process. If you are using a Managed Identity, you may need to grant the connection's identity the appropriate roles (e.g., "Azure Service Bus Data Sender" and "Azure Service Bus Data Receiver") on your Service Bus namespace.
-
-Once authorized, the Logic Apps will be fully functional and can start processing emails.
-az deployment group create \
-  --resource-group "YourResourceGroupName" \
-  --template-file "infra/workflows.bicep" \
-  --parameters office365ApiConnectionId=$OFFICE365_CONNECTION_ID \
-               serviceBusApiConnectionId=$SERVICEBUS_CONNECTION_ID
-```
-
-This command deploys the two Logic Apps and connects them to the pre-authorized API connections, enabling them to read from your mailbox and write to your Service Bus.
+By leveraging Service Bus, the multi-agent system becomes more robust, scalable, and resilient, capable of handling production workloads reliably.
 
 ---
 
