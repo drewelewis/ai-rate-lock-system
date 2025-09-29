@@ -41,50 +41,6 @@ The system consists of seven specialized agents that replicate the normal human-
 
 ---
 
-### Logic App Workflows
-
-To make the system more robust and scalable, email interactions are handled by Azure Logic Apps, which integrate with the Service Bus.
-
-- **Inbound Workflow (`inbound-email-processor.json`)**:
-  - **Trigger**: Activates when a new email arrives in a specific Office 365 inbox.
-  - **Action**:
-    1. Extracts the sender, subject, and body from the email.
-    2. Creates a JSON message containing the email data.
-    3. Sends this message to the `inbound-email-requests` Service Bus topic.
-  - **Purpose**: Decouples the agents from the email server. The `EmailIntakeAgent` listens to this Service Bus topic instead of polling an inbox directly.
-
-- **Outbound Workflow (`outbound-email-sender.json`)**:
-  - **Trigger**: Activates when a new message is received on the `outbound-email-notifications` Service Bus topic.
-  - **Action**:
-    1. Parses the incoming JSON message to get the recipient, subject, body, and any attachments.
-    2. Uses the Office 365 connector to send the email.
-  - **Purpose**: Allows any agent to send an email by simply placing a structured message on the Service Bus, without needing to handle SMTP or email APIs.
-
-### Benefits of Service Bus for Agent Communication
-
-Using Azure Service Bus as the backbone for communication between agents, rather than relying on in-process memory, provides several significant advantages that are critical for an enterprise-grade system:
-
-- **Decoupling and Modularity**: Agents do not need direct knowledge of one another. An agent's only responsibility is to publish a message to a topic or listen for messages on a subscription. This loose coupling means individual agents can be updated, replaced, or tested independently without affecting the rest of the system.
-
-- **Scalability**: Service Bus allows for competing consumers. If the volume of rate lock requests increases, you can scale out the system by running multiple instances of a specific agent (e.g., the `RateQuoteAgent`). Service Bus automatically distributes the message load across the available agent instances, enabling parallel processing. This is not possible with a single in-memory queue.
-
-- **Reliability and Durability**: Messages sent to Service Bus are persisted to durable storage. If an agent process crashes midway through handling a task, the message is not lost. It remains safely in the queue and can be re-processed once the agent restarts or by another instance. In-memory data, by contrast, would be lost permanently.
-
-- **Asynchronous Operations**: Agents can publish events or commands to the bus and immediately move on to their next task without waiting for a response. This non-blocking, asynchronous workflow improves the overall throughput and responsiveness of the system, as agents spend less time idle.
-
-- **Advanced Messaging Features**: Service Bus provides sophisticated, out-of-the-box features that are complex to build and maintain manually:
-  - **Topics and Subscriptions**: Allows for publish-subscribe patterns where one message can be delivered to multiple interested agents.
-  - **Dead-Lettering**: Automatically isolates messages that repeatedly fail processing, preventing them from blocking the queue and allowing for later inspection and manual intervention.
-  - **Message Ordering and Sessions**: Guarantees that related messages are processed in the correct sequence.
-
-- **Resilience and Load Leveling**: If a downstream agent is slow or temporarily unavailable, messages simply accumulate in the Service Bus queue. This prevents the upstream agents from being blocked or failing and ensures that work is not lost during transient faults. The queue acts as a buffer that smooths out processing loads.
-
-- **Observability**: Service Bus integrates seamlessly with Azure Monitor, providing detailed metrics on message throughput, queue lengths, and processing times. This makes it easier to monitor the health of the system, diagnose bottlenecks, and set up alerts for operational issues.
-
-By leveraging Service Bus, the multi-agent system becomes more robust, scalable, and resilient, capable of handling production workloads reliably.
-
----
-
 ## 🏦 **Loan Application Context Agent** (`LoanApplicationContextAgent`)
 **Primary Role**: Loan origination system integration and validation
 
@@ -366,6 +322,50 @@ graph TD
 - **Azure Cosmos DB**: Primary data storage for rate lock records
 - **Azure Application Insights**: Logging and monitoring
 - **Redis**: *(Optional)* Agent memory and caching for high-volume scenarios
+
+---
+
+### Logic App Workflows
+
+To make the system more robust and scalable, email interactions are handled by Azure Logic Apps, which integrate with the Service Bus.
+
+- **Inbound Workflow (`inbound-email-processor.json`)**:
+  - **Trigger**: Activates when a new email arrives in a specific Office 365 inbox.
+  - **Action**:
+    1. Extracts the sender, subject, and body from the email.
+    2. Creates a JSON message containing the email data.
+    3. Sends this message to the `inbound-email-requests` Service Bus topic.
+  - **Purpose**: Decouples the agents from the email server. The `EmailIntakeAgent` listens to this Service Bus topic instead of polling an inbox directly.
+
+- **Outbound Workflow (`outbound-email-sender.json`)**:
+  - **Trigger**: Activates when a new message is received on the `outbound-email-notifications` Service Bus topic.
+  - **Action**:
+    1. Parses the incoming JSON message to get the recipient, subject, body, and any attachments.
+    2. Uses the Office 365 connector to send the email.
+  - **Purpose**: Allows any agent to send an email by simply placing a structured message on the Service Bus, without needing to handle SMTP or email APIs.
+
+### Benefits of Service Bus for Agent Communication
+
+Using Azure Service Bus as the backbone for communication between agents, rather than relying on in-process memory, provides several significant advantages that are critical for an enterprise-grade system:
+
+- **Decoupling and Modularity**: Agents do not need direct knowledge of one another. An agent's only responsibility is to publish a message to a topic or listen for messages on a subscription. This loose coupling means individual agents can be updated, replaced, or tested independently without affecting the rest of the system.
+
+- **Scalability**: Service Bus allows for competing consumers. If the volume of rate lock requests increases, you can scale out the system by running multiple instances of a specific agent (e.g., the `RateQuoteAgent`). Service Bus automatically distributes the message load across the available agent instances, enabling parallel processing. This is not possible with a single in-memory queue.
+
+- **Reliability and Durability**: Messages sent to Service Bus are persisted to durable storage. If an agent process crashes midway through handling a task, the message is not lost. It remains safely in the queue and can be re-processed once the agent restarts or by another instance. In-memory data, by contrast, would be lost permanently.
+
+- **Asynchronous Operations**: Agents can publish events or commands to the bus and immediately move on to their next task without waiting for a response. This non-blocking, asynchronous workflow improves the overall throughput and responsiveness of the system, as agents spend less time idle.
+
+- **Advanced Messaging Features**: Service Bus provides sophisticated, out-of-the-box features that are complex to build and maintain manually:
+  - **Topics and Subscriptions**: Allows for publish-subscribe patterns where one message can be delivered to multiple interested agents.
+  - **Dead-Lettering**: Automatically isolates messages that repeatedly fail processing, preventing them from blocking the queue and allowing for later inspection and manual intervention.
+  - **Message Ordering and Sessions**: Guarantees that related messages are processed in the correct sequence.
+
+- **Resilience and Load Leveling**: If a downstream agent is slow or temporarily unavailable, messages simply accumulate in the Service Bus queue. This prevents the upstream agents from being blocked or failing and ensures that work is not lost during transient faults. The queue acts as a buffer that smooths out processing loads.
+
+- **Observability**: Service Bus integrates seamlessly with Azure Monitor, providing detailed metrics on message throughput, queue lengths, and processing times. This makes it easier to monitor the health of the system, diagnose bottlenecks, and set up alerts for operational issues.
+
+By leveraging Service Bus, the multi-agent system becomes more robust, scalable, and resilient, capable of handling production workloads reliably.
 
 ## Storage Architecture
 
