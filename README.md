@@ -256,6 +256,179 @@ The system uses a comprehensive JSON entity structure to represent loan locks at
 
 Different fields are populated as the rate lock progresses through its lifecycle, enabling agents to understand what actions are needed at each stage.
 
+### Data Model and Lifecycle
+
+The system uses a comprehensive JSON entity structure to represent loan locks at different stages. As a rate lock request progresses through the system, different agents populate and update the fields of this entity.
+
+#### State 1: `PendingRequest`
+
+This is the initial state when a request is first created by the `EmailIntakeAgent`. It contains only the essential information extracted from the initial email.
+
+```json
+{
+  "status": "PendingRequest",
+  "loanApplicationId": "LA-20250815-04567",
+  "borrower": {
+    "name": "Jane Doe",
+    "email": "jane.doe@example.com"
+  },
+  "lockDetails": {
+    "status": "PendingRequest"
+  },
+  "audit": {
+    "createdBy": "agent:EmailIntakeAgent",
+    "createdAt": "2025-09-27T14:00:00Z"
+  }
+}
+```
+- **Populated Fields**: `borrower`, `loanApplicationId`, `status`, `audit`.
+- **Empty Fields**: `rate`, `lockDate`, `lockExpirationDate`, `compliance`, `notifications`.
+
+---
+
+#### State 2: `UnderReview`
+
+After the `LoanApplicationContextAgent` has verified the loan and borrower details against the Loan Origination System (LOS), the status is updated to `UnderReview`.
+
+```json
+{
+  "status": "UnderReview",
+  "loanApplicationId": "LA-20250815-04567",
+  "borrower": {
+    "name": "Jane Doe",
+    "email": "jane.doe@example.com"
+  },
+  "lockDetails": {
+    "status": "UnderReview",
+    "loanAmount": 450000,
+    "loanType": "Conventional"
+  },
+  "audit": {
+    "createdBy": "agent:EmailIntakeAgent",
+    "lastUpdatedBy": "agent:LoanApplicationContextAgent"
+  }
+}
+```
+- **Populated Fields**: `loanAmount`, `loanType`, `status`, `audit`.
+- **Empty Fields**: `rate`, `lockDate`, `lockExpirationDate`, `compliance`, `notifications`.
+
+---
+
+#### State 3: `RateOptionsPresented`
+
+The `RateQuoteAgent` fetches available rate options from the pricing engine and presents them.
+
+```json
+{
+  "status": "RateOptionsPresented",
+  "lockDetails": {
+    "status": "RateOptionsPresented",
+    "rateOptions": [
+      { "termDays": 30, "rate": 6.25 },
+      { "termDays": 45, "rate": 6.375 }
+    ],
+    "lockSource": "Optimal Blue"
+  },
+  "audit": {
+    "lastUpdatedBy": "agent:RateQuoteAgent"
+  }
+}
+```
+- **Populated Fields**: `rateOptions`, `lockSource`.
+- **Empty Fields**: `lockDate`, `lockExpirationDate`, `compliance`, `notifications`.
+
+---
+
+#### State 4: `Locked`
+
+This is the final, successful state after the `LockConfirmationAgent` has executed the lock. All fields are now populated.
+
+```json
+{
+  "loanLockId": "LL-20250927-00123",
+  "loanApplicationId": "LA-20250815-04567",
+  "borrower": {
+    "name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "phone": "+1-555-123-4567"
+  },
+  "property": {
+    "address": "123 Main St, Morristown, NJ 07960",
+    "type": "Single Family",
+    "occupancy": "Primary Residence"
+  },
+  "lockDetails": {
+    "status": "Locked",
+    "lockDate": "2025-09-27T14:30:00Z",
+    "lockExpirationDate": "2025-10-27T23:59:59Z",
+    "lockTermDays": 30,
+    "rate": 6.25,
+    "loanAmount": 450000,
+    "loanType": "Conventional",
+    "loanPurpose": "Purchase",
+    "rateType": "Fixed",
+    "floatDownOption": false,
+    "lockSource": "Optimal Blue",
+    "lockedBy": "agent:LockConfirmationAgent"
+  },
+  "compliance": {
+    "disclosuresSent": true,
+    "lockFee": 250.00,
+    "lockFeeWaived": false,
+    "regulatoryChecksPassed": true,
+    "exceptions": []
+  },
+  "audit": {
+    "createdBy": "agent:EmailIntakeAgent",
+    "createdAt": "2025-09-27T14:31:00Z",
+    "lastUpdatedBy": "agent:ComplianceAgent",
+    "lastUpdatedAt": "2025-09-27T14:45:00Z"
+  },
+  "notifications": {
+    "borrowerNotified": true,
+    "loanOfficerNotified": true,
+    "notificationMethod": ["email"]
+  }
+}
+```
+- **All fields are populated.**
+
+---
+
+#### Terminal States: `Expired` and `Cancelled`
+
+If a lock is not confirmed in time or is withdrawn, it moves to a terminal state.
+
+- **`Expired`**: The lock was not used before its expiration date.
+  ```json
+  {
+    "status": "Expired",
+    "lockDetails": {
+      "status": "Expired",
+      "lockDate": "2025-08-15T10:00:00Z",
+      "lockExpirationDate": "2025-09-15T23:59:59Z",
+      "rate": 6.25
+    },
+    "audit": {
+      "lastUpdatedBy": "agent:AuditAgent"
+    }
+  }
+  ```
+
+- **`Cancelled`**: The lock was manually cancelled.
+  ```json
+  {
+    "status": "Cancelled",
+    "lockDetails": {
+      "status": "Cancelled",
+      "cancelReason": "Borrower switched to ARM product"
+    },
+    "audit": {
+      "lastUpdatedBy": "agent:ExceptionHandlerAgent"
+    }
+  }
+  ```
+
 ## Agent Communication Model
 
 ### **Shared State Architecture**
