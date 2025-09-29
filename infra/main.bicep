@@ -78,6 +78,33 @@ module monitoring 'core/monitor/monitoring.bicep' = {
   }
 }
 
+resource office365Connection 'Microsoft.Web/connections@2016-06-01' = {
+  name: 'office365'
+  location: location
+  properties: {
+    displayName: 'Office365'
+    customParameterValues: {}
+    api: {
+      id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'office365')
+    }
+  }
+}
+
+resource serviceBusConnection 'Microsoft.Web/connections@2016-06-01' = {
+  name: 'servicebus'
+  location: location
+  properties: {
+    displayName: 'ServiceBus'
+    customParameterValues: {}
+    api: {
+      id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'servicebus')
+    }
+    parameterValues: {
+      connectionString: serviceBus.outputs.connectionString
+    }
+  }
+}
+
 // Container services - commented out for now, will add back when containerizing
 // module containerApps 'core/host/container-apps.bicep' = {
 //   name: 'container-apps'
@@ -100,27 +127,28 @@ module monitoring 'core/monitor/monitoring.bicep' = {
 //   }
 // }
 
+module workflows 'workflows.bicep' = {
+  name: 'workflows'
+  params: {
+    location: location
+    office365ApiConnectionId: office365Connection.id
+    serviceBusApiConnectionId: serviceBusConnection.id
+  }
+}
+
 // Outputs for application configuration
 output AZURE_LOCATION string = location
 output AZURE_TENANT_ID string = tenant().tenantId
 output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId
 
 // OpenAI Configuration
+output AZURE_OPENAI_NAME string = openAIAccountName
 output AZURE_OPENAI_ENDPOINT string = openAI.outputs.endpoint
-output AZURE_OPENAI_SERVICE string = openAI.outputs.name
-
-// Cosmos DB Configuration  
-output AZURE_COSMOS_ENDPOINT string = cosmosDb.outputs.endpoint
-output AZURE_COSMOS_DATABASE_NAME string = cosmosDb.outputs.databaseName
-
-// Service Bus Configuration
-output AZURE_SERVICE_BUS_ENDPOINT string = serviceBus.outputs.endpoint
-output AZURE_SERVICE_BUS_NAMESPACE string = serviceBus.outputs.namespaceName
-
-// Container Apps Configuration - commented out for now
-// output AZURE_CONTAINER_APPS_ENVIRONMENT_ID string = containerApps.outputs.environmentId
-// output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerRegistry.outputs.loginServer
-// output AZURE_CONTAINER_REGISTRY_NAME string = containerRegistry.outputs.name
-
-// Monitoring Configuration
-output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.applicationInsightsConnectionString
+output AZURE_COSMOSDB_ACCOUNT_NAME string = cosmosDbAccountName
+output AZURE_COSMOSDB_ENDPOINT string = cosmosDb.outputs.endpoint
+output AZURE_SERVICEBUS_NAMESPACE_NAME string = serviceBusNamespaceName
+output AZURE_SERVICEBUS_ENDPOINT string = serviceBus.outputs.endpoint
+output AZURE_LOG_ANALYTICS_WORKSPACE_NAME string = logAnalyticsWorkspaceName
+output AZURE_APPLICATION_INSIGHTS_NAME string = applicationInsightsName
+output OFFICE365_CONNECTION_ID string = office365Connection.id
+output SERVICEBUS_CONNECTION_ID string = serviceBusConnection.id

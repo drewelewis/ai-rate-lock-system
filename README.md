@@ -60,44 +60,41 @@ To make the system more robust and scalable, email interactions are handled by A
     2. Uses the Office 365 connector to send the email.
   - **Purpose**: Allows any agent to send an email by simply placing a structured message on the Service Bus, without needing to handle SMTP or email APIs.
 
-### Deploying and Configuring the Logic Apps
+### Deploying and Configuring the Infrastructure
 
-Deploying and configuring the Logic Apps is a two-step process:
+The infrastructure, including the Logic App workflows, is defined in Bicep files and can be deployed using the Azure Developer CLI (`azd`).
 
-**Step 1: Create and Authorize API Connections (Manual, One-Time Setup)**
+**Step 1: Provision the Infrastructure**
 
-The Logic Apps need permission to access your Office 365 mailbox and Service Bus. This is done by creating and authorizing API Connections in the Azure Portal.
+The Bicep files in the `infra` directory define all the necessary Azure resources. The `main.bicep` file creates API Connection resources for both Office 365 and Service Bus.
 
-1.  Navigate to your resource group in the Azure Portal.
-2.  Click **"+ Create"** and search for `API Connection`.
-3.  **Create an Office 365 Connection**:
-    -   Select "Office 365 Outlook".
-    -   Give it a name (e.g., `office365-connection`).
-    -   Click **"Authorize"** and sign in with the email account you want the Logic Apps to use.
-    -   Click **"Create"**.
-4.  **Create a Service Bus Connection**:
-    -   Search for `API Connection` again and select "Service Bus".
-    -   Give it a name (e.g., `servicebus-connection`).
-    -   Choose an authentication method (Managed Identity is recommended).
-    -   Click **"Create"**.
-5.  **Copy the Resource IDs**: For each API Connection, go to its "Properties" blade and copy the **Resource ID**. You will need these for the deployment script.
-
-**Step 2: Deploy the Logic Apps via Bicep**
-
-The Logic App definitions are included in the `infra/workflows.bicep` file. You can deploy them using the Azure CLI.
+To deploy the infrastructure, run the following command:
 
 ```bash
-# Log in to Azure
-az login
+azd up
+```
 
-# Set your subscription
-az account set --subscription "Your Subscription Name"
+This command will:
+1.  Create a resource group.
+2.  Provision all the resources defined in the `infra` directory, including the API Connections and Logic Apps.
 
-# Get the Resource IDs from the API Connections you created in Step 1
-OFFICE365_CONNECTION_ID="/subscriptions/your-sub-id/resourceGroups/your-rg/providers/Microsoft.Web/connections/office365-connection"
-SERVICEBUS_CONNECTION_ID="/subscriptions/your-sub-id/resourceGroups/your-rg/providers/Microsoft.Web/connections/servicebus-connection"
+**Step 2: Authorize the API Connections (Manual, One-Time Setup)**
 
-# Deploy the Bicep file for the workflows
+For security reasons, the Bicep deployment only creates the API Connection *placeholders*. You must manually authorize them to grant the Logic Apps access to your resources.
+
+1.  Navigate to the resource group created by `azd` in the Azure Portal.
+2.  Find the **API Connections**:
+    -   `office365`: This is the connection for Office 365.
+    -   `servicebus`: This is the connection for the Service Bus.
+3.  **Authorize the Office 365 Connection**:
+    -   Click on the `office365` API Connection.
+    -   You will see a banner indicating that the connection needs to be authorized.
+    -   Click **"Authorize"**, sign in with the email account you want the Logic App to use, and save the connection.
+4.  **Authorize the Service Bus Connection**:
+    -   Click on the `servicebus` API Connection.
+    -   Follow the same authorization process. If you are using a Managed Identity, you may need to grant the connection's identity the appropriate roles (e.g., "Azure Service Bus Data Sender" and "Azure Service Bus Data Receiver") on your Service Bus namespace.
+
+Once authorized, the Logic Apps will be fully functional and can start processing emails.
 az deployment group create \
   --resource-group "YourResourceGroupName" \
   --template-file "infra/workflows.bicep" \

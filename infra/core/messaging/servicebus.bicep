@@ -182,3 +182,9 @@ resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = i
 output endpoint string = 'https://${serviceBusNamespace.name}.servicebus.windows.net'
 output namespaceName string = serviceBusNamespace.name
 output id string = serviceBusNamespace.id
+output endpoint string = serviceBusNamespace.properties.serviceBusEndpoint
+
+var rootManageSharedAccessKeyName = 'RootManageSharedAccessKey'
+
+@secure()
+output connectionString string = listKeys(resourceId('Microsoft.ServiceBus/namespaces/authorizationRules', serviceBusNamespace.name, rootManageSharedAccessKeyName), '2021-11-01').primaryConnectionString
