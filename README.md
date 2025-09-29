@@ -41,6 +41,74 @@ The system consists of seven specialized agents that replicate the normal human-
 
 ---
 
+### Logic App Workflows
+
+To make the system more robust and scalable, email interactions are handled by Azure Logic Apps, which integrate with the Service Bus.
+
+- **Inbound Workflow (`inbound-email-processor.json`)**:
+  - **Trigger**: Activates when a new email arrives in a specific Office 365 inbox.
+  - **Action**:
+    1. Extracts the sender, subject, and body from the email.
+    2. Creates a JSON message containing the email data.
+    3. Sends this message to the `inbound-email-requests` Service Bus topic.
+  - **Purpose**: Decouples the agents from the email server. The `EmailIntakeAgent` listens to this Service Bus topic instead of polling an inbox directly.
+
+- **Outbound Workflow (`outbound-email-sender.json`)**:
+  - **Trigger**: Activates when a new message is received on the `outbound-email-notifications` Service Bus topic.
+  - **Action**:
+    1. Parses the incoming JSON message to get the recipient, subject, body, and any attachments.
+    2. Uses the Office 365 connector to send the email.
+  - **Purpose**: Allows any agent to send an email by simply placing a structured message on the Service Bus, without needing to handle SMTP or email APIs.
+
+### Deploying and Configuring the Logic Apps
+
+Deploying and configuring the Logic Apps is a two-step process:
+
+**Step 1: Create and Authorize API Connections (Manual, One-Time Setup)**
+
+The Logic Apps need permission to access your Office 365 mailbox and Service Bus. This is done by creating and authorizing API Connections in the Azure Portal.
+
+1.  Navigate to your resource group in the Azure Portal.
+2.  Click **"+ Create"** and search for `API Connection`.
+3.  **Create an Office 365 Connection**:
+    -   Select "Office 365 Outlook".
+    -   Give it a name (e.g., `office365-connection`).
+    -   Click **"Authorize"** and sign in with the email account you want the Logic Apps to use.
+    -   Click **"Create"**.
+4.  **Create a Service Bus Connection**:
+    -   Search for `API Connection` again and select "Service Bus".
+    -   Give it a name (e.g., `servicebus-connection`).
+    -   Choose an authentication method (Managed Identity is recommended).
+    -   Click **"Create"**.
+5.  **Copy the Resource IDs**: For each API Connection, go to its "Properties" blade and copy the **Resource ID**. You will need these for the deployment script.
+
+**Step 2: Deploy the Logic Apps via Bicep**
+
+The Logic App definitions are included in the `infra/workflows.bicep` file. You can deploy them using the Azure CLI.
+
+```bash
+# Log in to Azure
+az login
+
+# Set your subscription
+az account set --subscription "Your Subscription Name"
+
+# Get the Resource IDs from the API Connections you created in Step 1
+OFFICE365_CONNECTION_ID="/subscriptions/your-sub-id/resourceGroups/your-rg/providers/Microsoft.Web/connections/office365-connection"
+SERVICEBUS_CONNECTION_ID="/subscriptions/your-sub-id/resourceGroups/your-rg/providers/Microsoft.Web/connections/servicebus-connection"
+
+# Deploy the Bicep file for the workflows
+az deployment group create \
+  --resource-group "YourResourceGroupName" \
+  --template-file "infra/workflows.bicep" \
+  --parameters office365ApiConnectionId=$OFFICE365_CONNECTION_ID \
+               serviceBusApiConnectionId=$SERVICEBUS_CONNECTION_ID
+```
+
+This command deploys the two Logic Apps and connects them to the pre-authorized API connections, enabling them to read from your mailbox and write to your Service Bus.
+
+---
+
 ## 🏦 **Loan Application Context Agent** (`LoanApplicationContextAgent`)
 **Primary Role**: Loan origination system integration and validation
 

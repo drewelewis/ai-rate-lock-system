@@ -4,494 +4,206 @@ Escalates complex cases and issues to human loan officers for review.
 """
 
 import asyncio
-from typing import Optional, Dict, Any, List
+import json
+from typing import Dict, Any
 from datetime import datetime, timedelta
 import logging
+import os
+
+# Semantic Kernel imports
+from semantic_kernel import Kernel
+from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+from semantic_kernel.functions import kernel_function
+
+# Import our plugins
+from plugins.cosmos_db_plugin import CosmosDBPlugin
+from plugins.service_bus_plugin import ServiceBusPlugin
 
 logger = logging.getLogger(__name__)
 
 class ExceptionHandlerAgent:
     """
-    Role: Escalates issues to a human loan officer if something goes wrong.
+    Role: Manages and escalates exceptions for human review.
     
     Tasks:
-    - Identify scenarios requiring human intervention
-    - Route exceptions to appropriate staff members
-    - Track escalation resolution times
-    - Provide context and recommendations for human reviewers
+    - Listens for 'exception_alert' messages.
+    - Uses an LLM to analyze, summarize, and categorize the exception.
+    - Creates a detailed exception record in the 'Exceptions' container in Cosmos DB.
+    - (Future) Assigns exceptions to the appropriate team/person based on rules.
+    - (Future) Sends notifications about new high-priority exceptions.
     """
     
-    def __init__(self, notification_service=None, staff_service=None, audit_service=None):
-        self.notification_service = notification_service
-        self.staff_service = staff_service
-        self.audit_service = audit_service
-        self.agent_name = "ExceptionHandlerAgent"
-    
-    async def handle_exception(self, loan_lock_id: str, exception_type: str, 
-                              exception_details: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle an exception by escalating to appropriate human staff."""
-        logger.info(f"{self.agent_name}: Handling exception {exception_type} for loan {loan_lock_id}")
-        
+    def __init__(self):
+        self.agent_name = "exception_handler_agent"
+        self.session_id = f"exception_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        self.kernel = None
+        self.cosmos_plugin = None
+        self.servicebus_plugin = None
+
+        self._initialized = False
+
+    async def _initialize_kernel(self):
+        """Initialize Semantic Kernel with Azure OpenAI and plugins."""
+        if self._initialized:
+            return
+            
         try:
-            # Classify the exception
-            classification = await self._classify_exception(exception_type, exception_details, context)
+            self.kernel = Kernel()
             
-            # Determine escalation target
-            escalation_target = await self._determine_escalation_target(classification, context)
+            endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+            api_key = os.environ.get("AZURE_OPENAI_API_KEY") 
+            deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
             
-            # Create escalation case
-            escalation_case = await self._create_escalation_case(
-                loan_lock_id, exception_type, exception_details, context, classification, escalation_target
-            )
+            if not all([endpoint, api_key, deployment_name]):
+                raise ValueError("Missing Azure OpenAI configuration for Exception Handler Agent.")
+
+            self.kernel.add_service(AzureChatCompletion(
+                deployment_name=deployment_name,
+                endpoint=endpoint,
+                api_key=api_key
+            ))
             
-            # Send escalation notifications
-            notification_result = await self._send_escalation_notifications(escalation_case)
+            self.cosmos_plugin = CosmosDBPlugin(debug=True, session_id=self.session_id)
+            self.servicebus_plugin = ServiceBusPlugin(debug=True, session_id=self.session_id)
             
-            # Update loan lock status
-            await self._update_loan_lock_status(loan_lock_id, escalation_case)
+            self.kernel.add_plugin(self.cosmos_plugin, plugin_name="cosmos_db")
+            self.kernel.add_plugin(self.servicebus_plugin, plugin_name="service_bus")
+            self.kernel.add_plugin(self, plugin_name="exception_analyzer")
             
-            # Log the escalation
-            if self.audit_service:
-                await self.audit_service.log_agent_action(
-                    loan_lock_id=loan_lock_id,
-                    agent_name=self.agent_name,
-                    action="ESCALATE_EXCEPTION",
-                    details=escalation_case,
-                    outcome="SUCCESS"
-                )
-            
-            escalation_response = {
-                "escalation_id": escalation_case.get("escalation_id"),
-                "status": "ESCALATED",
-                "escalation_target": escalation_target,
-                "priority": classification.get("priority"),
-                "estimated_resolution_time": classification.get("estimated_resolution_time"),
-                "notification_sent": notification_result.get("success", False),
-                "next_steps": escalation_case.get("recommended_actions"),
-                "audit": {
-                    "escalated_by": self.agent_name,
-                    "escalated_at": datetime.utcnow().isoformat()
-                }
-            }
-            
-            logger.info(f"{self.agent_name}: Successfully escalated exception {escalation_case.get('escalation_id')}")
-            return escalation_response
+            self._initialized = True
+            logger.info(f"{self.agent_name}: Semantic Kernel initialized successfully")
             
         except Exception as e:
-            logger.error(f"{self.agent_name}: Error handling exception - {str(e)}")
+            logger.error(f"{self.agent_name}: Failed to initialize Semantic Kernel - {str(e)}")
             raise
-    
-    async def _classify_exception(self, exception_type: str, exception_details: Dict[str, Any], 
-                                 context: Dict[str, Any]) -> Dict[str, Any]:
-        """Classify the exception to determine handling approach."""
-        classification = {
-            "category": "UNKNOWN",
-            "priority": "MEDIUM",
-            "complexity": "STANDARD",
-            "estimated_resolution_time": "4 hours",
-            "requires_specialist": False,
-            "blocking_issue": False
-        }
+
+    async def handle_message(self, message: Dict[str, Any]):
+        """Handles a single exception message from the service bus."""
+        await self._initialize_kernel()
         
-        # High priority exceptions
-        high_priority_types = [
-            "COMPLIANCE_FAILURE",
-            "REGULATORY_VIOLATION", 
-            "SYSTEM_ERROR",
-            "DATA_CORRUPTION",
-            "CRITICAL_DEADLINE"
-        ]
+        message_type = message.get('message_type')
         
-        # Complex exceptions requiring specialists
-        specialist_required_types = [
-            "COMPLEX_LOAN_SCENARIO",
-            "PRICING_ANOMALY",
-            "REGULATORY_INTERPRETATION",
-            "CUSTOM_PRODUCT_REQUIREMENTS"
-        ]
-        
-        # Blocking exceptions that stop all progress
-        blocking_types = [
-            "MISSING_REQUIRED_DOCUMENTATION",
-            "BORROWER_ELIGIBILITY_ISSUE",
-            "PROPERTY_VALUATION_PROBLEM",
-            "CREDIT_ISSUE"
-        ]
-        
-        if exception_type in high_priority_types:
-            classification["priority"] = "HIGH"
-            classification["estimated_resolution_time"] = "2 hours"
-        
-        if exception_type in specialist_required_types:
-            classification["requires_specialist"] = True
-            classification["complexity"] = "COMPLEX"
-            classification["estimated_resolution_time"] = "1 day"
-        
-        if exception_type in blocking_types:
-            classification["blocking_issue"] = True
-            classification["priority"] = "HIGH"
-        
-        # Set category based on exception type
-        if "COMPLIANCE" in exception_type or "REGULATORY" in exception_type:
-            classification["category"] = "COMPLIANCE"
-        elif "PRICING" in exception_type or "RATE" in exception_type:
-            classification["category"] = "PRICING"
-        elif "BORROWER" in exception_type or "ELIGIBILITY" in exception_type:
-            classification["category"] = "UNDERWRITING"
-        elif "SYSTEM" in exception_type or "TECHNICAL" in exception_type:
-            classification["category"] = "TECHNICAL"
-        else:
-            classification["category"] = "GENERAL"
-        
-        return classification
-    
-    async def _determine_escalation_target(self, classification: Dict[str, Any], 
-                                          context: Dict[str, Any]) -> Dict[str, Any]:
-        """Determine who should handle the escalated exception."""
-        
-        # Default to loan officer
-        target = {
-            "type": "LOAN_OFFICER",
-            "name": None,
-            "email": None,
-            "phone": None
-        }
-        
+        if message_type != 'exception_alert':
+            logger.warning(f"Received unexpected message type: {message_type}. Skipping.")
+            return
+
         try:
-            # Get loan officer from context
-            loan_officer = context.get("loan_officer")
+            priority = message.get('priority', 'medium')
+            exception_type = message.get('exception_type', 'UNKNOWN')
+            loan_application_id = message.get('loan_application_id')
+            exception_data = message.get('exception_data', {})
             
-            if not loan_officer and self.staff_service:
-                # Fetch loan officer from staff service
-                loan_officer = await self.staff_service.get_loan_officer_for_loan(
-                    context.get("loan_application_id")
-                )
-            
-            if loan_officer:
-                target.update({
-                    "name": loan_officer.get("name"),
-                    "email": loan_officer.get("email"),
-                    "phone": loan_officer.get("phone")
-                })
-            
-            # Route to specialists based on classification
-            if classification.get("category") == "COMPLIANCE":
-                specialist = await self._get_compliance_specialist()
-                if specialist:
-                    target = {
-                        "type": "COMPLIANCE_SPECIALIST",
-                        **specialist
-                    }
-            
-            elif classification.get("category") == "PRICING":
-                specialist = await self._get_pricing_specialist()
-                if specialist:
-                    target = {
-                        "type": "PRICING_SPECIALIST", 
-                        **specialist
-                    }
-            
-            elif classification.get("category") == "TECHNICAL":
-                specialist = await self._get_technical_support()
-                if specialist:
-                    target = {
-                        "type": "TECHNICAL_SUPPORT",
-                        **specialist
-                    }
-            
-            elif classification.get("priority") == "HIGH":
-                # Route high priority to supervisor
-                supervisor = await self._get_supervisor(loan_officer)
-                if supervisor:
-                    target = {
-                        "type": "SUPERVISOR",
-                        **supervisor
-                    }
-            
-        except Exception as e:
-            logger.error(f"Error determining escalation target: {str(e)}")
-        
-        return target
-    
-    async def _create_escalation_case(self, loan_lock_id: str, exception_type: str, 
-                                     exception_details: Dict[str, Any], context: Dict[str, Any],
-                                     classification: Dict[str, Any], escalation_target: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a comprehensive escalation case."""
-        
-        escalation_case = {
-            "escalation_id": self._generate_escalation_id(),
-            "loan_lock_id": loan_lock_id,
-            "loan_application_id": context.get("loan_application_id"),
-            "exception_type": exception_type,
-            "exception_details": exception_details,
-            "classification": classification,
-            "escalation_target": escalation_target,
-            "created_at": datetime.utcnow().isoformat(),
-            "status": "OPEN",
-            "priority": classification.get("priority"),
-            "estimated_resolution": (datetime.utcnow() + timedelta(
-                hours=self._parse_time_estimate(classification.get("estimated_resolution_time"))
-            )).isoformat(),
-            "context": {
-                "borrower_info": context.get("borrower_info", {}),
-                "loan_details": context.get("loan_details", {}),
-                "current_state": context.get("current_state"),
-                "previous_actions": context.get("previous_actions", []),
-                "system_state": context.get("system_state", {})
-            },
-            "recommended_actions": self._generate_recommended_actions(exception_type, exception_details, context),
-            "escalation_reason": self._generate_escalation_reason(exception_type, exception_details),
-            "supporting_documents": context.get("supporting_documents", []),
-            "metadata": {
-                "escalated_by": self.agent_name,
-                "automatic_escalation": True,
-                "requires_callback": classification.get("blocking_issue", False)
-            }
-        }
-        
-        return escalation_case
-    
-    async def _send_escalation_notifications(self, escalation_case: Dict[str, Any]) -> Dict[str, Any]:
-        """Send notifications about the escalation."""
-        notification_result = {
-            "success": False,
-            "notifications_sent": [],
-            "errors": []
-        }
-        
-        try:
-            if not self.notification_service:
-                logger.warning("Notification service not configured")
-                return notification_result
-            
-            target = escalation_case.get("escalation_target", {})
-            target_email = target.get("email")
-            target_phone = target.get("phone")
-            
-            # Send email notification
-            if target_email:
-                email_result = await self._send_escalation_email(escalation_case, target_email)
-                if email_result.get("success"):
-                    notification_result["notifications_sent"].append("email")
-                else:
-                    notification_result["errors"].append(f"Email failed: {email_result.get('error')}")
-            
-            # Send SMS for high priority cases
-            if target_phone and escalation_case.get("priority") == "HIGH":
-                sms_result = await self._send_escalation_sms(escalation_case, target_phone)
-                if sms_result.get("success"):
-                    notification_result["notifications_sent"].append("sms")
-                else:
-                    notification_result["errors"].append(f"SMS failed: {sms_result.get('error')}")
-            
-            # Send Slack/Teams notification if configured
-            slack_result = await self._send_slack_notification(escalation_case)
-            if slack_result.get("success"):
-                notification_result["notifications_sent"].append("slack")
-            
-            notification_result["success"] = len(notification_result["notifications_sent"]) > 0
-            
-        except Exception as e:
-            logger.error(f"Error sending escalation notifications: {str(e)}")
-            notification_result["errors"].append(str(e))
-        
-        return notification_result
-    
-    async def _send_escalation_email(self, escalation_case: Dict[str, Any], target_email: str) -> Dict[str, Any]:
-        """Send escalation email notification."""
-        try:
-            subject = f"ESCALATION: Rate Lock Issue - {escalation_case.get('loan_application_id')} [{escalation_case.get('priority')} Priority]"
-            
-            body = f"""
-RATE LOCK ESCALATION REQUIRED
+            logger.info(f"Processing '{priority}' priority exception '{exception_type}' for loan '{loan_application_id}'")
 
-Escalation ID: {escalation_case.get('escalation_id')}
-Loan Application: {escalation_case.get('loan_application_id')}
-Priority: {escalation_case.get('priority')}
-Exception Type: {escalation_case.get('exception_type')}
-
-ESCALATION REASON:
-{escalation_case.get('escalation_reason')}
-
-RECOMMENDED ACTIONS:
-"""
-            
-            for action in escalation_case.get('recommended_actions', []):
-                body += f"• {action}\n"
-            
-            body += f"""
-
-BORROWER INFORMATION:
-Name: {escalation_case.get('context', {}).get('borrower_info', {}).get('name', 'N/A')}
-Email: {escalation_case.get('context', {}).get('borrower_info', {}).get('email', 'N/A')}
-
-LOAN DETAILS:
-Amount: ${escalation_case.get('context', {}).get('loan_details', {}).get('loan_amount', 'N/A'):,}
-Type: {escalation_case.get('context', {}).get('loan_details', {}).get('loan_type', 'N/A')}
-
-Estimated Resolution Time: {escalation_case.get('estimated_resolution')}
-
-Please review and take appropriate action as soon as possible.
-
----
-Automated Rate Lock Processing System
-Escalation ID: {escalation_case.get('escalation_id')}
-"""
-            
-            await self.notification_service.send_email(
-                to=target_email,
-                subject=subject,
-                body=body,
-                priority=escalation_case.get('priority')
+            # Use the LLM to analyze the exception
+            analysis_result_str = await self.kernel.invoke(
+                self.kernel.plugins["exception_analyzer"]["analyze_exception"],
+                exception_type=exception_type,
+                error_message=exception_data.get("error_message", "No message provided."),
+                context=json.dumps(exception_data)
             )
-            
-            return {"success": True}
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    async def _send_escalation_sms(self, escalation_case: Dict[str, Any], target_phone: str) -> Dict[str, Any]:
-        """Send escalation SMS notification."""
-        try:
-            message = f"URGENT: Rate Lock Escalation {escalation_case.get('escalation_id')} - Loan {escalation_case.get('loan_application_id')} requires immediate attention. Check email for details."
-            
-            await self.notification_service.send_sms(
-                to=target_phone,
-                message=message
-            )
-            
-            return {"success": True}
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    async def _send_slack_notification(self, escalation_case: Dict[str, Any]) -> Dict[str, Any]:
-        """Send Slack notification for escalation."""
-        try:
-            if not hasattr(self.notification_service, 'send_slack_message'):
-                return {"success": False, "error": "Slack not configured"}
-            
-            message = {
-                "text": f"🚨 Rate Lock Escalation - {escalation_case.get('priority')} Priority",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*Escalation:* {escalation_case.get('escalation_id')}\n*Loan:* {escalation_case.get('loan_application_id')}\n*Type:* {escalation_case.get('exception_type')}\n*Priority:* {escalation_case.get('priority')}"
-                        }
-                    }
-                ]
+            analysis_result = json.loads(str(analysis_result_str))
+
+            # Prepare the record for Cosmos DB
+            exception_payload = {
+                "loan_application_id": loan_application_id,
+                "exception_type": exception_type,
+                "agent_name": exception_data.get("agent", "Unknown"),
+                "description": analysis_result.get("summary", "Analysis failed."),
+                "context": exception_data,
+                "assignee": analysis_result.get("suggested_assignee", "unassigned"),
+                "estimated_resolution_time": analysis_result.get("estimated_resolution_time_hrs", 8)
             }
-            
-            await self.notification_service.send_slack_message(message)
-            return {"success": True}
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def _generate_escalation_id(self) -> str:
-        """Generate unique escalation ID."""
-        return f"ESC-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-    
-    def _parse_time_estimate(self, time_estimate: str) -> int:
-        """Parse time estimate string to hours."""
-        try:
-            if "hour" in time_estimate:
-                return int(time_estimate.split()[0])
-            elif "day" in time_estimate:
-                return int(time_estimate.split()[0]) * 24
+
+            # Call the CosmosDB plugin to create the exception record
+            result_str = await self.cosmos_plugin.create_exception(priority, json.dumps(exception_payload))
+            result = json.loads(result_str)
+
+            if not result.get("success"):
+                # This is a critical failure. If we can't log exceptions, the system is blind.
+                error_msg = f"CRITICAL: Failed to create exception record in Cosmos DB. Details: {result.get('error')}"
+                logger.error(error_msg)
+                # We won't send another exception alert to avoid a loop. Just log it.
             else:
-                return 4  # Default 4 hours
-        except:
-            return 4
-    
-    def _generate_recommended_actions(self, exception_type: str, exception_details: Dict[str, Any], 
-                                    context: Dict[str, Any]) -> List[str]:
-        """Generate recommended actions based on exception type."""
-        actions = []
+                logger.info(f"Successfully created exception record {result.get('data', {}).get('exception_id')} for loan '{loan_application_id}'")
+
+        except Exception as e:
+            # This is the 'meta-exception'. An exception occurred within the exception handler itself.
+            error_msg = f"FATAL: Unhandled error in ExceptionHandlerAgent: {str(e)}"
+            logger.critical(error_msg)
+            # At this point, we can't trust our own exception bus. The best we can do is log to console.
+
+    @kernel_function(
+        description="Analyzes a technical or business exception and provides a summary, suggested assignee, and estimated resolution time.",
+        name="analyze_exception"
+    )
+    def analyze_exception(
+        self,
+        exception_type: str,
+        error_message: str,
+        context: str
+    ) -> str:
+        """
+        Uses an LLM to analyze an exception and return a structured JSON response.
         
-        if exception_type == "COMPLIANCE_FAILURE":
-            actions.extend([
-                "Review compliance violation details",
-                "Determine if rate lock can proceed with additional disclosures",
-                "Consult with compliance team if necessary"
-            ])
+        The prompt is designed to guide the LLM to provide a consistent, structured output
+        that can be used to create a ticket or alert for human intervention.
+        """
         
-        elif exception_type == "MISSING_REQUIRED_DOCUMENTATION":
-            actions.extend([
-                "Contact borrower to request missing documents",
-                "Set deadline for document submission",
-                "Consider extending rate lock if needed"
-            ])
+        prompt = f"""
+        Analyze the following exception from our automated rate lock system and provide a structured JSON response.
+
+        **Exception Details:**
+        - Type: {exception_type}
+        - Error Message: {error_message}
+        - Full Context: {context}
+
+        **Your Task:**
+        Based on the information, generate a JSON object with the following keys:
+        1. "summary": A concise, one-sentence summary of the problem for a human loan officer or IT support person.
+        2. "suggested_assignee": Who should handle this? Your options are "Loan Officer", "IT Support", "Compliance Team", or "unassigned". Base this on the exception type and message.
+        3. "estimated_resolution_time_hrs": An integer estimate of the hours needed to resolve this.
+
+        **Assignee Guidelines:**
+        - "COMPLIANCE_RISK": Assign to "Compliance Team".
+        - "PRICING_UNAVAILABLE", "TECHNICAL_ERROR", "LOGGING_FAILURE": Assign to "IT Support".
+        - "MISSING_DATA", "INVALID_LOAN_DATA": Assign to "Loan Officer".
+        - If unsure, use "unassigned".
+
+        **Example Response:**
+        {{
+            "summary": "The compliance check failed because the borrower's debt-to-income ratio exceeds the maximum allowed limit.",
+            "suggested_assignee": "Compliance Team",
+            "estimated_resolution_time_hrs": 2
+        }}
+
+        **JSON Response:**
+        """
+        # In a real scenario, you would invoke the LLM here.
+        # For this simulation, we are returning a pre-canned response based on the type.
         
-        elif exception_type == "PRICING_ANOMALY":
-            actions.extend([
-                "Verify pricing engine configuration",
-                "Check for market data issues",
-                "Consider manual rate quote if needed"
-            ])
-        
-        elif exception_type == "BORROWER_ELIGIBILITY_ISSUE":
-            actions.extend([
-                "Review underwriting guidelines",
-                "Determine if additional conditions can resolve issue",
-                "Consider alternative loan products"
-            ])
-        
+        if "COMPLIANCE" in exception_type.upper():
+            assignee = "Compliance Team"
+            summary = f"A compliance rule failed during processing. Details: {error_message}"
+            hours = 4
+        elif any(err in exception_type.upper() for err in ["TECHNICAL", "PRICING", "LOGGING"]):
+            assignee = "IT Support"
+            summary = f"A technical error occurred in the '{json.loads(context).get('agent', 'unknown')}' agent. Details: {error_message}"
+            hours = 8
         else:
-            actions.extend([
-                "Review exception details and context",
-                "Determine appropriate resolution approach",
-                "Update loan status based on findings"
-            ])
-        
-        return actions
-    
-    def _generate_escalation_reason(self, exception_type: str, exception_details: Dict[str, Any]) -> str:
-        """Generate human-readable escalation reason."""
-        reason_templates = {
-            "COMPLIANCE_FAILURE": "A compliance issue was detected that requires human review to ensure regulatory requirements are met.",
-            "MISSING_REQUIRED_DOCUMENTATION": "Required documentation is missing and automated follow-up has been unsuccessful.",
-            "PRICING_ANOMALY": "The pricing engine returned unexpected results that need manual verification.",
-            "BORROWER_ELIGIBILITY_ISSUE": "Borrower eligibility concerns were identified that require underwriting review.",
-            "SYSTEM_ERROR": "A technical error occurred that prevented automated processing from continuing.",
-            "COMPLEX_LOAN_SCENARIO": "The loan scenario is too complex for automated processing and requires expert review."
-        }
-        
-        base_reason = reason_templates.get(exception_type, "An exception occurred that requires human intervention.")
-        
-        # Add specific details if available
-        if exception_details.get("details"):
-            base_reason += f" Specific issue: {exception_details.get('details')}"
-        
-        return base_reason
-    
-    async def _update_loan_lock_status(self, loan_lock_id: str, escalation_case: Dict[str, Any]) -> None:
-        """Update loan lock status to reflect escalation."""
-        # TODO: Implement status update to loan lock storage
-        logger.info(f"Updated loan lock {loan_lock_id} status to ESCALATED")
-    
-    async def _get_compliance_specialist(self) -> Optional[Dict[str, str]]:
-        """Get compliance specialist contact information."""
-        if self.staff_service:
-            return await self.staff_service.get_compliance_specialist()
-        return None
-    
-    async def _get_pricing_specialist(self) -> Optional[Dict[str, str]]:
-        """Get pricing specialist contact information."""
-        if self.staff_service:
-            return await self.staff_service.get_pricing_specialist()
-        return None
-    
-    async def _get_technical_support(self) -> Optional[Dict[str, str]]:
-        """Get technical support contact information."""
-        if self.staff_service:
-            return await self.staff_service.get_technical_support()
-        return None
-    
-    async def _get_supervisor(self, loan_officer: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
-        """Get supervisor contact information."""
-        if self.staff_service and loan_officer:
-            return await self.staff_service.get_supervisor(loan_officer.get('id'))
-        return None
+            assignee = "Loan Officer"
+            summary = f"There is an issue with the loan data provided. Details: {error_message}"
+            hours = 2
+
+        return json.dumps({
+            "summary": summary,
+            "suggested_assignee": assignee,
+            "estimated_resolution_time_hrs": hours
+        })
+
+    async def close(self):
+        if self._initialized:
+            if self.cosmos_plugin: await self.cosmos_plugin.close()
+            if self.servicebus_plugin: await self.servicebus_plugin.close()
+        logger.info(f"{self.agent_name}: Resources cleaned up.")

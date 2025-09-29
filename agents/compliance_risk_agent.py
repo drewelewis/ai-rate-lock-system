@@ -4,9 +4,20 @@ Ensures rate lock requests comply with internal and regulatory guidelines.
 """
 
 import asyncio
-from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
+import json
+from typing import Dict, Any
+from datetime import datetime
 import logging
+import os
+
+# Semantic Kernel imports
+from semantic_kernel import Kernel
+from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+
+# Import our plugins
+from plugins.cosmos_db_plugin import CosmosDBPlugin
+from plugins.service_bus_plugin import ServiceBusPlugin
+from plugins.compliance_plugin import CompliancePlugin
 
 logger = logging.getLogger(__name__)
 
@@ -15,361 +26,168 @@ class ComplianceRiskAgent:
     Role: Ensures the lock request complies with internal and regulatory guidelines.
     
     Tasks:
-    - Check lock window vs. estimated closing date
-    - Validate lock fees, disclosures, and timing
-    - Flag any exceptions (e.g., expired pre-approval, missing disclosures)
-    - Ensure regulatory compliance (TRID, state requirements)
+    - Listens for 'rates_presented' messages.
+    - Fetches the loan record with rate options from Cosmos DB.
+    - Runs a series of compliance checks (TRID, state laws, fee tolerance).
+    - Updates the rate lock record with the compliance results and sets status.
+    - Sends a 'compliance_checked' message to trigger the Lock Confirmation Agent.
     """
     
-    def __init__(self, compliance_service=None, disclosure_service=None):
-        self.compliance_service = compliance_service
-        self.disclosure_service = disclosure_service
-        self.agent_name = "ComplianceRiskAgent"
-    
-    async def validate_lock_request(self, loan_context: Dict[str, Any], rate_quote: Dict[str, Any]) -> Dict[str, Any]:
-        """Perform comprehensive compliance validation on rate lock request."""
-        logger.info(f"{self.agent_name}: Validating compliance for loan {loan_context.get('loan_application_id')}")
-        
-        try:
-            validation_results = {
-                "loan_application_id": loan_context.get('loan_application_id'),
-                "validation_date": datetime.utcnow().isoformat(),
-                "overall_status": "PENDING",
-                "compliance_checks": {},
-                "required_disclosures": [],
-                "exceptions": [],
-                "next_actions": [],
-                "audit": {
-                    "validated_by": self.agent_name,
-                    "validated_at": datetime.utcnow().isoformat()
-                }
-            }
-            
-            # Perform all compliance checks
-            await self._check_lock_timing(loan_context, rate_quote, validation_results)
-            await self._validate_disclosures(loan_context, validation_results)
-            await self._check_regulatory_requirements(loan_context, validation_results)
-            await self._validate_lock_fees(rate_quote, validation_results)
-            await self._check_loan_status_eligibility(loan_context, validation_results)
-            await self._validate_borrower_capacity(loan_context, validation_results)
-            
-            # Determine overall status
-            validation_results["overall_status"] = self._determine_overall_status(validation_results)
-            
-            logger.info(f"{self.agent_name}: Compliance validation completed with status {validation_results['overall_status']}")
-            return validation_results
-            
-        except Exception as e:
-            logger.error(f"{self.agent_name}: Error during compliance validation - {str(e)}")
-            raise
-    
-    async def _check_lock_timing(self, loan_context: Dict[str, Any], rate_quote: Dict[str, Any], results: Dict[str, Any]) -> None:
-        """Validate lock timing against closing schedule."""
-        try:
-            closing_date = loan_context.get('estimated_closing_date')
-            rate_options = rate_quote.get('rate_options', [])
-            
-            timing_check = {
-                "status": "PASS",
-                "issues": [],
-                "recommendations": []
-            }
-            
-            if not closing_date:
-                timing_check["status"] = "WARNING"
-                timing_check["issues"].append("No estimated closing date provided")
-                timing_check["recommendations"].append("Obtain estimated closing date for optimal lock term selection")
-            else:
-                # Calculate days to closing
-                closing_dt = datetime.fromisoformat(closing_date.replace('Z', '+00:00'))
-                days_to_closing = (closing_dt - datetime.utcnow()).days
-                
-                if days_to_closing < 15:
-                    timing_check["status"] = "WARNING"
-                    timing_check["issues"].append(f"Short timeline to closing ({days_to_closing} days)")
-                    timing_check["recommendations"].append("Consider 30-day lock maximum")
-                
-                if days_to_closing > 90:
-                    timing_check["status"] = "WARNING"
-                    timing_check["issues"].append(f"Extended timeline to closing ({days_to_closing} days)")
-                    timing_check["recommendations"].append("Consider longer lock terms or delayed lock timing")
-                
-                # Check if any rate options exceed closing timeline
-                for option in rate_options:
-                    lock_days = option.get('lock_term_days', 30)
-                    if lock_days < days_to_closing - 5:  # 5-day buffer
-                        timing_check["recommendations"].append(f"Consider {lock_days}-day lock may be insufficient")
-            
-            results["compliance_checks"]["lock_timing"] = timing_check
-            
-        except Exception as e:
-            logger.error(f"Error checking lock timing: {str(e)}")
-            results["compliance_checks"]["lock_timing"] = {
-                "status": "ERROR",
-                "issues": [f"Failed to validate timing: {str(e)}"]
-            }
-    
-    async def _validate_disclosures(self, loan_context: Dict[str, Any], results: Dict[str, Any]) -> None:
-        """Validate required disclosures are present and current."""
-        disclosure_check = {
-            "status": "PASS",
-            "issues": [],
-            "missing_disclosures": []
-        }
-        
-        required_disclosures = [
-            "initial_loan_estimate",
-            "rate_lock_disclosure",
-            "good_faith_estimate",
-            "truth_in_lending"
-        ]
-        
-        try:
-            loan_id = loan_context.get('loan_application_id')
-            
-            for disclosure_type in required_disclosures:
-                is_present = await self._check_disclosure_present(loan_id, disclosure_type)
-                is_current = await self._check_disclosure_current(loan_id, disclosure_type)
-                
-                if not is_present:
-                    disclosure_check["missing_disclosures"].append(disclosure_type)
-                    disclosure_check["status"] = "FAIL"
-                elif not is_current:
-                    disclosure_check["issues"].append(f"{disclosure_type} is outdated")
-                    disclosure_check["status"] = "WARNING"
-            
-            # Add required disclosures to results
-            if disclosure_check["missing_disclosures"]:
-                results["required_disclosures"].extend(disclosure_check["missing_disclosures"])
-                results["next_actions"].append("Generate and send missing disclosures")
-            
-            results["compliance_checks"]["disclosures"] = disclosure_check
-            
-        except Exception as e:
-            logger.error(f"Error validating disclosures: {str(e)}")
-            results["compliance_checks"]["disclosures"] = {
-                "status": "ERROR",
-                "issues": [f"Failed to validate disclosures: {str(e)}"]
-            }
-    
-    async def _check_regulatory_requirements(self, loan_context: Dict[str, Any], results: Dict[str, Any]) -> None:
-        """Check regulatory compliance requirements (TRID, state laws, etc.)."""
-        regulatory_check = {
-            "status": "PASS",
-            "issues": [],
-            "requirements": []
-        }
-        
-        try:
-            property_state = loan_context.get('property_info', {}).get('state')
-            loan_amount = loan_context.get('loan_details', {}).get('loan_amount', 0)
-            
-            # TRID compliance check
-            if loan_amount >= 100000:  # TRID applies to most residential mortgages
-                trid_compliant = await self._check_trid_compliance(loan_context)
-                if not trid_compliant:
-                    regulatory_check["status"] = "FAIL"
-                    regulatory_check["issues"].append("TRID compliance requirements not met")
-            
-            # State-specific requirements
-            state_requirements = await self._check_state_requirements(property_state, loan_context)
-            if state_requirements["issues"]:
-                regulatory_check["issues"].extend(state_requirements["issues"])
-                regulatory_check["status"] = "WARNING" if regulatory_check["status"] == "PASS" else regulatory_check["status"]
-            
-            regulatory_check["requirements"] = state_requirements.get("requirements", [])
-            
-            results["compliance_checks"]["regulatory"] = regulatory_check
-            
-        except Exception as e:
-            logger.error(f"Error checking regulatory requirements: {str(e)}")
-            results["compliance_checks"]["regulatory"] = {
-                "status": "ERROR",
-                "issues": [f"Failed to validate regulatory requirements: {str(e)}"]
-            }
-    
-    async def _validate_lock_fees(self, rate_quote: Dict[str, Any], results: Dict[str, Any]) -> None:
-        """Validate lock fees are reasonable and properly disclosed."""
-        fee_check = {
-            "status": "PASS",
-            "issues": [],
-            "fee_summary": {}
-        }
-        
-        try:
-            lock_fees = rate_quote.get('lock_fees', {})
-            
-            # Check fee reasonableness
-            for term, fee in lock_fees.items():
-                if fee > 1000:  # High fee threshold
-                    fee_check["status"] = "WARNING"
-                    fee_check["issues"].append(f"High lock fee for {term}: ${fee}")
-                
-                fee_check["fee_summary"][term] = fee
-            
-            results["compliance_checks"]["lock_fees"] = fee_check
-            
-        except Exception as e:
-            logger.error(f"Error validating lock fees: {str(e)}")
-            results["compliance_checks"]["lock_fees"] = {
-                "status": "ERROR",
-                "issues": [f"Failed to validate lock fees: {str(e)}"]
-            }
-    
-    async def _check_loan_status_eligibility(self, loan_context: Dict[str, Any], results: Dict[str, Any]) -> None:
-        """Check if loan status allows for rate lock."""
-        status_check = {
-            "status": "PASS",
-            "issues": [],
-            "current_status": ""
-        }
-        
-        try:
-            loan_status = loan_context.get('status_info', {}).get('current_status', '').lower()
-            eligible_statuses = ['pre-approved', 'underwritten', 'conditionally_approved', 'clear_to_close']
-            
-            status_check["current_status"] = loan_status
-            
-            if loan_status not in eligible_statuses:
-                status_check["status"] = "FAIL"
-                status_check["issues"].append(f"Loan status '{loan_status}' not eligible for rate lock")
-                results["exceptions"].append(f"Ineligible loan status: {loan_status}")
-            
-            results["compliance_checks"]["loan_status"] = status_check
-            
-        except Exception as e:
-            logger.error(f"Error checking loan status eligibility: {str(e)}")
-            results["compliance_checks"]["loan_status"] = {
-                "status": "ERROR",
-                "issues": [f"Failed to validate loan status: {str(e)}"]
-            }
-    
-    async def _validate_borrower_capacity(self, loan_context: Dict[str, Any], results: Dict[str, Any]) -> None:
-        """Validate borrower has capacity to proceed with rate lock."""
-        capacity_check = {
-            "status": "PASS",
-            "issues": [],
-            "checks_performed": []
-        }
-        
-        try:
-            borrower_info = loan_context.get('borrower_info', {})
-            
-            # Check income verification
-            if not borrower_info.get('income_verified'):
-                capacity_check["status"] = "WARNING"
-                capacity_check["issues"].append("Income verification pending")
-            capacity_check["checks_performed"].append("income_verification")
-            
-            # Check asset verification
-            if not borrower_info.get('assets_verified'):
-                capacity_check["status"] = "WARNING"
-                capacity_check["issues"].append("Asset verification pending")
-            capacity_check["checks_performed"].append("asset_verification")
-            
-            # Check debt-to-income ratio
-            dti = borrower_info.get('debt_to_income')
-            if dti and dti > 43:  # Standard DTI threshold
-                capacity_check["status"] = "WARNING"
-                capacity_check["issues"].append(f"High debt-to-income ratio: {dti}%")
-            capacity_check["checks_performed"].append("debt_to_income")
-            
-            results["compliance_checks"]["borrower_capacity"] = capacity_check
-            
-        except Exception as e:
-            logger.error(f"Error validating borrower capacity: {str(e)}")
-            results["compliance_checks"]["borrower_capacity"] = {
-                "status": "ERROR",
-                "issues": [f"Failed to validate borrower capacity: {str(e)}"]
-            }
-    
-    def _determine_overall_status(self, results: Dict[str, Any]) -> str:
-        """Determine overall compliance status based on all checks."""
-        checks = results.get("compliance_checks", {})
-        
-        # If any check failed, overall status is FAIL
-        for check_name, check_result in checks.items():
-            if check_result.get("status") == "FAIL":
-                return "FAIL"
-            elif check_result.get("status") == "ERROR":
-                return "ERROR"
-        
-        # If any check has warnings, overall status is WARNING
-        for check_name, check_result in checks.items():
-            if check_result.get("status") == "WARNING":
-                return "WARNING"
-        
-        return "PASS"
-    
-    async def _check_disclosure_present(self, loan_id: str, disclosure_type: str) -> bool:
-        """Check if required disclosure is present."""
-        if not self.disclosure_service:
-            return True  # Assume present if service not configured
-        
-        try:
-            return await self.disclosure_service.check_disclosure_exists(loan_id, disclosure_type)
-        except Exception:
-            return False
-    
-    async def _check_disclosure_current(self, loan_id: str, disclosure_type: str) -> bool:
-        """Check if disclosure is current (not expired)."""
-        if not self.disclosure_service:
-            return True  # Assume current if service not configured
-        
-        try:
-            return await self.disclosure_service.check_disclosure_current(loan_id, disclosure_type)
-        except Exception:
-            return False
-    
-    async def _check_trid_compliance(self, loan_context: Dict[str, Any]) -> bool:
-        """Check TRID (Truth in Lending/Real Estate Settlement) compliance."""
-        # TODO: Implement TRID compliance checks
-        # This would check timing requirements, disclosure accuracy, etc.
-        return True  # Placeholder
-    
-    async def _check_state_requirements(self, state: str, loan_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Check state-specific regulatory requirements."""
-        state_check = {
-            "issues": [],
-            "requirements": []
-        }
-        
-        if not state:
-            return state_check
-        
-        # TODO: Implement state-specific compliance checks
-        # Different states have different requirements for rate locks
-        
-        return state_check
-    
-    async def generate_compliance_report(self, validation_results: Dict[str, Any]) -> str:
-        """Generate a human-readable compliance report."""
-        report = f"""
-COMPLIANCE VALIDATION REPORT
-============================
-Loan ID: {validation_results.get('loan_application_id')}
-Validation Date: {validation_results.get('validation_date')}
-Overall Status: {validation_results.get('overall_status')}
+    def __init__(self):
+        self.agent_name = "compliance_risk_agent"
+        self.session_id = f"compliance_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-COMPLIANCE CHECKS:
-"""
-        
-        for check_name, check_result in validation_results.get('compliance_checks', {}).items():
-            report += f"\n{check_name.upper()}: {check_result.get('status')}\n"
+        self.kernel = None
+        self.cosmos_plugin = None
+        self.servicebus_plugin = None
+        self.compliance_plugin = None
+
+        self._initialized = False
+        self._is_processing = False
+
+    async def _initialize_kernel(self):
+        """Initialize Semantic Kernel with Azure OpenAI and plugins."""
+        if self._initialized:
+            return
             
-            if check_result.get('issues'):
-                report += "  Issues:\n"
-                for issue in check_result.get('issues'):
-                    report += f"    - {issue}\n"
+        try:
+            self.kernel = Kernel()
+            
+            endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+            api_key = os.environ.get("AZURE_OPENAI_API_KEY") 
+            deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+            
+            if endpoint and api_key:
+                self.kernel.add_service(AzureChatCompletion(
+                    deployment_name=deployment_name,
+                    endpoint=endpoint,
+                    api_key=api_key
+                ))
+            
+            self.cosmos_plugin = CosmosDBPlugin(debug=True, session_id=self.session_id)
+            self.servicebus_plugin = ServiceBusPlugin(debug=True, session_id=self.session_id)
+            self.compliance_plugin = CompliancePlugin(debug=True, session_id=self.session_id)
+            
+            self.kernel.add_plugin(self.cosmos_plugin, plugin_name="cosmos_db")
+            self.kernel.add_plugin(self.servicebus_plugin, plugin_name="service_bus")
+            self.kernel.add_plugin(self.compliance_plugin, plugin_name="compliance")
+            
+            self._initialized = True
+            logger.info(f"{self.agent_name}: Semantic Kernel initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"{self.agent_name}: Failed to initialize Semantic Kernel - {str(e)}")
+            raise
+
+    async def handle_message(self, message: Dict[str, Any]):
+        """Handles a single message from the service bus."""
+        await self._initialize_kernel()
         
-        if validation_results.get('exceptions'):
-            report += "\nEXCEPTIONS:\n"
-            for exception in validation_results.get('exceptions'):
-                report += f"  - {exception}\n"
+        message_type = message.get('message_type')
+        loan_application_id = message.get('loan_application_id')
         
-        if validation_results.get('next_actions'):
-            report += "\nNEXT ACTIONS:\n"
-            for action in validation_results.get('next_actions'):
-                report += f"  - {action}\n"
-        
-        return report
+        logger.info(f"{self.agent_name}: Received message '{message_type}' for loan '{loan_application_id}'")
+
+        if message_type != 'rates_presented':
+            logger.warning(f"Received unexpected message type: {message_type}. Skipping.")
+            return
+
+        try:
+            # 1. Fetch the full loan record from Cosmos DB
+            rate_lock_record_str = await self.cosmos_plugin.get_rate_lock(loan_application_id)
+            rate_lock_record = json.loads(rate_lock_record_str)
+
+            if not rate_lock_record.get("success"):
+                raise ValueError(f"Could not retrieve rate lock record for {loan_application_id}")
+
+            loan_data = rate_lock_record.get("data", {})
+
+            # 2. Run compliance assessment
+            compliance_result_str = await self.compliance_plugin.run_compliance_assessment(json.dumps(loan_data))
+            compliance_result = json.loads(compliance_result_str)
+
+            if not compliance_result.get("success"):
+                raise ValueError(f"Compliance assessment failed: {compliance_result.get('error')}")
+
+            compliance_data = compliance_result.get("data", {})
+            compliance_status = compliance_data.get("overall_status", "Failed")
+
+            # 3. Determine new status and update Cosmos DB
+            new_status = "Compliance" + compliance_status # e.g., "CompliancePassed" or "ComplianceFailed"
+            update_payload = {
+                "status": new_status,
+                "compliance_check_results": compliance_data,
+                "compliance_checked_at": datetime.utcnow().isoformat()
+            }
+            await self.cosmos_plugin.update_rate_lock(loan_application_id, json.dumps(update_payload))
+            
+            # 4. Send audit message
+            await self._send_audit_message("COMPLIANCE_CHECKED", loan_application_id, {
+                "status": new_status,
+                "compliance_status": compliance_status
+            })
+            
+            # 5. Send workflow message for the next agent
+            if compliance_status == "Passed":
+                await self._send_workflow_message("compliance_passed", loan_application_id, {
+                    "loan_application_id": loan_application_id,
+                    "next_action": "present_for_confirmation"
+                })
+                logger.info(f"Compliance check PASSED for loan '{loan_application_id}'.")
+            else:
+                # If compliance fails, we might send an alert or trigger a manual review
+                await self._send_exception_alert("COMPLIANCE_FAILURE", "medium", 
+                                                 f"Compliance check failed for loan {loan_application_id}", 
+                                                 loan_application_id)
+                logger.warning(f"Compliance check FAILED for loan '{loan_application_id}'.")
+
+
+        except Exception as e:
+            error_msg = f"Failed to process compliance check for loan '{loan_application_id}': {str(e)}"
+            logger.error(error_msg)
+            await self._send_exception_alert("TECHNICAL_ERROR", "high", error_msg, loan_application_id)
+
+    async def _send_audit_message(self, action: str, loan_application_id: str, audit_data: Dict[str, Any]):
+        try:
+            await self.servicebus_plugin.send_audit_message(
+                agent_name=self.agent_name,
+                action=action,
+                loan_application_id=loan_application_id,
+                audit_data=json.dumps(audit_data)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send audit message: {str(e)}")
+
+    async def _send_workflow_message(self, message_type: str, loan_application_id: str, message_data: Dict[str, Any]):
+        try:
+            await self.servicebus_plugin.send_workflow_message(
+                message_type=message_type,
+                loan_application_id=loan_application_id,
+                message_data=json.dumps(message_data),
+                correlation_id=self.session_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to send workflow message: {str(e)}")
+
+    async def _send_exception_alert(self, exception_type: str, priority: str, message: str, loan_application_id: str):
+        try:
+            exception_data = {
+                "agent": self.agent_name,
+                "error_message": message,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            await self.servicebus_plugin.send_exception_alert(
+                exception_type=exception_type,
+                priority=priority,
+                loan_application_id=loan_application_id,
+                exception_data=json.dumps(exception_data)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send exception alert: {str(e)}")
+
+    async def close(self):
+        if self._initialized:
+            if self.cosmos_plugin: await self.cosmos_plugin.close()
+            if self.servicebus_plugin: await self.servicebus_plugin.close()
+            if self.compliance_plugin: await self.compliance_plugin.close()
+        logger.info(f"{self.agent_name}: Resources cleaned up.")

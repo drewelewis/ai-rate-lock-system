@@ -41,9 +41,7 @@ class AzureConfig:
         """Get Container Registry endpoint"""
         return os.getenv('AZURE_CONTAINER_REGISTRY_ENDPOINT')
     
-    def get_application_insights_connection(self) -> str:
-        """Get Application Insights connection string"""
-        return os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING')
+
     
     def get_azure_location(self) -> str:
         """Get Azure region"""

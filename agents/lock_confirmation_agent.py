@@ -1,374 +1,278 @@
 """
 Lock Confirmation Agent
-Executes the rate lock and sends confirmation notifications.
+Executes the rate lock and sends confirmation notifications via Service Bus.
 """
 
 import asyncio
-from typing import Optional, Dict, Any
+import json
+from typing import Dict, Any
 from datetime import datetime, timedelta
 import logging
+import os
+
+# Semantic Kernel imports
+from semantic_kernel import Kernel
+from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+
+# Import our plugins
+from plugins.cosmos_db_plugin import CosmosDBPlugin
+from plugins.service_bus_plugin import ServiceBusPlugin
+from plugins.pricing_engine_plugin import PricingEnginePlugin
+from plugins.los_plugin import LOSPlugin
+from plugins.document_plugin import DocumentPlugin
 
 logger = logging.getLogger(__name__)
 
 class LockConfirmationAgent:
     """
-    Role: Executes the lock and sends confirmation.
+    Role: Executes the lock and sends confirmation notifications.
     
     Tasks:
-    - Submit lock request to pricing engine or LOS
-    - Generate lock confirmation document
-    - Email borrower and loan officer with confirmation and next steps
+    - Listens for 'compliance_passed' messages.
+    - Fetches the loan record.
+    - Submits the final lock request to the pricing engine/LOS.
+    - Generates a lock confirmation document.
+    - Sends messages to Service Bus to trigger confirmation emails.
+    - Updates the rate lock record with the final 'Locked' status.
     """
     
-    def __init__(self, pricing_service=None, los_service=None, email_service=None, document_service=None):
-        self.pricing_service = pricing_service
-        self.los_service = los_service
-        self.email_service = email_service
-        self.document_service = document_service
-        self.agent_name = "LockConfirmationAgent"
-    
-    async def execute_rate_lock(self, loan_context: Dict[str, Any], selected_rate: Dict[str, Any], compliance_validation: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the rate lock and generate confirmation."""
-        logger.info(f"{self.agent_name}: Executing rate lock for loan {loan_context.get('loan_application_id')}")
+    def __init__(self):
+        self.agent_name = "lock_confirmation_agent"
+        self.session_id = f"lock_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
+        self.kernel = None
+        self.cosmos_plugin = None
+        self.servicebus_plugin = None
+        self.pricing_plugin = None
+        self.los_plugin = None
+        self.document_plugin = None
+        
+        self._initialized = False
+
+    async def _initialize_kernel(self):
+        """Initialize Semantic Kernel with Azure OpenAI and plugins."""
+        if self._initialized:
+            return
+            
         try:
-            # Validate prerequisites
-            if not self._validate_lock_prerequisites(compliance_validation):
-                raise ValueError("Compliance validation failed - cannot execute lock")
+            self.kernel = Kernel()
             
-            # Submit lock to pricing system
-            lock_submission = await self._submit_lock_to_pricing_system(loan_context, selected_rate)
+            endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+            api_key = os.environ.get("AZURE_OPENAI_API_KEY") 
+            deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
             
-            # Update LOS with lock information
-            await self._update_los_with_lock(loan_context, lock_submission)
+            if endpoint and api_key:
+                self.kernel.add_service(AzureChatCompletion(
+                    deployment_name=deployment_name,
+                    endpoint=endpoint,
+                    api_key=api_key
+                ))
             
-            # Generate lock confirmation document
-            confirmation_document = await self._generate_confirmation_document(loan_context, lock_submission)
+            self.cosmos_plugin = CosmosDBPlugin(debug=True, session_id=self.session_id)
+            self.servicebus_plugin = ServiceBusPlugin(debug=True, session_id=self.session_id)
+            self.pricing_plugin = PricingEnginePlugin(debug=True, session_id=self.session_id)
+            self.los_plugin = LOSPlugin(debug=True, session_id=self.session_id)
+            self.document_plugin = DocumentPlugin(debug=True, session_id=self.session_id)
             
-            # Send notifications
-            notification_results = await self._send_lock_confirmations(loan_context, lock_submission, confirmation_document)
+            self.kernel.add_plugin(self.cosmos_plugin, plugin_name="cosmos_db")
+            self.kernel.add_plugin(self.servicebus_plugin, plugin_name="service_bus")
+            self.kernel.add_plugin(self.pricing_plugin, plugin_name="pricing_engine")
+            self.kernel.add_plugin(self.los_plugin, plugin_name="los")
+            self.kernel.add_plugin(self.document_plugin, plugin_name="document")
             
-            # Build final lock confirmation response
-            lock_confirmation = {
-                "loan_application_id": loan_context.get('loan_application_id'),
-                "lock_confirmation_id": lock_submission.get('lock_id'),
-                "status": "Locked",
-                "lock_details": {
-                    "rate": selected_rate.get('rate'),
-                    "points": selected_rate.get('points'),
-                    "lock_term_days": selected_rate.get('lock_term_days'),
-                    "lock_date": lock_submission.get('lock_date'),
-                    "lock_expiration_date": lock_submission.get('lock_expiration_date'),
-                    "product_description": selected_rate.get('product_description'),
-                    "monthly_payment": selected_rate.get('monthly_payment'),
-                    "lock_source": lock_submission.get('pricing_source')
-                },
-                "compliance": {
-                    "disclosures_sent": True,
-                    "lock_fee": selected_rate.get('lock_fee', 0.0),
-                    "lock_fee_waived": selected_rate.get('lock_fee_waived', False),
-                    "regulatory_checks_passed": True,
-                    "exceptions": compliance_validation.get('exceptions', [])
-                },
-                "confirmation_document": confirmation_document,
-                "notifications": notification_results,
-                "audit": {
-                    "locked_by": self.agent_name,
-                    "locked_at": datetime.utcnow().isoformat(),
-                    "confirmation_sent": True
-                }
-            }
-            
-            logger.info(f"{self.agent_name}: Successfully executed rate lock {lock_confirmation['lock_confirmation_id']}")
-            return lock_confirmation
+            self._initialized = True
+            logger.info(f"{self.agent_name}: Semantic Kernel initialized successfully")
             
         except Exception as e:
-            logger.error(f"{self.agent_name}: Error executing rate lock - {str(e)}")
+            logger.error(f"{self.agent_name}: Failed to initialize Semantic Kernel - {str(e)}")
             raise
-    
-    def _validate_lock_prerequisites(self, compliance_validation: Dict[str, Any]) -> bool:
-        """Validate all prerequisites are met before executing lock."""
-        overall_status = compliance_validation.get('overall_status')
+
+    async def handle_message(self, message: Dict[str, Any]):
+        """Handles a single message from the service bus."""
+        await self._initialize_kernel()
         
-        # Only allow locks if compliance passed or has manageable warnings
-        if overall_status in ['PASS', 'WARNING']:
-            return True
+        message_type = message.get('message_type')
+        loan_application_id = message.get('loan_application_id')
         
-        logger.error(f"Cannot execute lock - compliance status: {overall_status}")
-        return False
-    
-    async def _submit_lock_to_pricing_system(self, loan_context: Dict[str, Any], selected_rate: Dict[str, Any]) -> Dict[str, Any]:
-        """Submit rate lock request to the pricing engine."""
+        logger.info(f"{self.agent_name}: Received message '{message_type}' for loan '{loan_application_id}'")
+
+        if message_type != 'compliance_passed':
+            logger.warning(f"Received unexpected message type: {message_type}. Skipping.")
+            return
+
         try:
-            lock_request = self._build_lock_request(loan_context, selected_rate)
+            # 1. Fetch the full loan record from Cosmos DB
+            rate_lock_record_str = await self.cosmos_plugin.get_rate_lock(loan_application_id)
+            rate_lock_record = json.loads(rate_lock_record_str)
+
+            if not rate_lock_record.get("success"):
+                raise ValueError(f"Could not retrieve rate lock record for {loan_application_id}")
+
+            loan_data = rate_lock_record.get("data", {})
             
-            if self.pricing_service:
-                # Submit to actual pricing service
-                lock_response = await self.pricing_service.submit_lock(lock_request)
+            # Assume the borrower selected the first rate option for this simulation
+            selected_rate = loan_data.get("rate_options", [{}])[0]
+            if not selected_rate:
+                raise ValueError("No rate options found in the record to lock.")
+
+            # 2. Execute the rate lock with the pricing engine
+            lock_result_str = await self.pricing_plugin.execute_rate_lock(json.dumps(selected_rate))
+            lock_result = json.loads(lock_result_str)
+
+            if not lock_result.get("success"):
+                raise ValueError(f"Failed to execute rate lock: {lock_result.get('error')}")
+            
+            lock_details = lock_result.get("data", {})
+
+            # 3. Generate the confirmation document
+            doc_result_str = await self.document_plugin.generate_lock_confirmation(json.dumps(loan_data), json.dumps(lock_details))
+            doc_result = json.loads(doc_result_str)
+            if not doc_result.get("success"):
+                logger.warning(f"Failed to generate confirmation document: {doc_result.get('error')}")
+                confirmation_doc = None
             else:
-                # Mock response for development
-                lock_response = self._generate_mock_lock_response(lock_request)
+                confirmation_doc = doc_result.get("data")
+
+            # 4. Send confirmation email notifications via Service Bus
+            borrower_info = loan_data.get("los_data", {}).get("borrower_info", {})
+            loan_officer_info = loan_data.get("los_data", {}).get("loan_officer_info", {})
             
-            return lock_response
-            
-        except Exception as e:
-            logger.error(f"Error submitting lock to pricing system: {str(e)}")
-            raise
-    
-    def _build_lock_request(self, loan_context: Dict[str, Any], selected_rate: Dict[str, Any]) -> Dict[str, Any]:
-        """Build lock request payload for pricing system."""
-        loan_details = loan_context.get('loan_details', {})
-        borrower_info = loan_context.get('borrower_info', {})
-        property_info = loan_context.get('property_info', {})
-        
-        return {
-            "loan_application_id": loan_context.get('loan_application_id'),
-            "borrower_name": borrower_info.get('name'),
-            "borrower_email": borrower_info.get('email'),
-            "loan_amount": loan_details.get('loan_amount'),
-            "loan_type": loan_details.get('loan_type'),
-            "property_address": property_info.get('address'),
-            "rate": selected_rate.get('rate'),
-            "points": selected_rate.get('points', 0.0),
-            "lock_term_days": selected_rate.get('lock_term_days'),
-            "product_code": selected_rate.get('product_code'),
-            "lock_fee": selected_rate.get('lock_fee', 0.0),
-            "requested_by": self.agent_name,
-            "requested_at": datetime.utcnow().isoformat()
-        }
-    
-    def _generate_mock_lock_response(self, lock_request: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate mock lock response for testing."""
-        lock_date = datetime.utcnow()
-        expiration_date = lock_date + timedelta(days=lock_request.get('lock_term_days', 30))
-        
-        return {
-            "lock_id": f"LOCK-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-            "status": "CONFIRMED",
-            "lock_date": lock_date.isoformat(),
-            "lock_expiration_date": expiration_date.isoformat(),
-            "pricing_source": "MockPricingEngine",
-            "confirmation_number": f"CNF{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-        }
-    
-    async def _update_los_with_lock(self, loan_context: Dict[str, Any], lock_submission: Dict[str, Any]) -> bool:
-        """Update the Loan Origination System with lock details."""
-        try:
-            if not self.los_service:
-                logger.warning("LOS service not configured - skipping LOS update")
-                return True
-            
-            update_data = {
-                "loan_application_id": loan_context.get('loan_application_id'),
-                "rate_lock_id": lock_submission.get('lock_id'),
-                "locked_rate": lock_submission.get('rate'),
-                "lock_expiration_date": lock_submission.get('lock_expiration_date'),
-                "lock_status": "ACTIVE"
+            await self._send_confirmation_notifications(borrower_info, loan_officer_info, loan_application_id, lock_details, confirmation_doc)
+
+            # 5. Update the Cosmos DB record with the final status
+            new_status = "Locked"
+            update_payload = {
+                "status": new_status,
+                "lock_details": lock_details,
+                "locked_at": datetime.utcnow().isoformat(),
+                "confirmation_document_id": confirmation_doc.get("document_id") if confirmation_doc else None
             }
+            await self.cosmos_plugin.update_rate_lock(loan_application_id, json.dumps(update_payload))
             
-            success = await self.los_service.update_rate_lock(update_data)
+            # 6. Send final audit message
+            await self._send_audit_message("RATE_LOCKED", loan_application_id, {
+                "status": new_status,
+                "lock_id": lock_details.get("confirmation_id")
+            })
             
-            if success:
-                logger.info(f"Successfully updated LOS with lock information")
-            else:
-                logger.warning(f"Failed to update LOS with lock information")
-            
-            return success
-            
+            logger.info(f"Rate lock successfully executed and confirmed for loan '{loan_application_id}'.")
+
         except Exception as e:
-            logger.error(f"Error updating LOS: {str(e)}")
-            return False
-    
-    async def _generate_confirmation_document(self, loan_context: Dict[str, Any], lock_submission: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate rate lock confirmation document."""
-        try:
-            if self.document_service:
-                # Use document service to generate professional document
-                document = await self.document_service.generate_lock_confirmation(loan_context, lock_submission)
-            else:
-                # Generate basic confirmation document
-                document = self._generate_basic_confirmation_document(loan_context, lock_submission)
-            
-            return document
-            
-        except Exception as e:
-            logger.error(f"Error generating confirmation document: {str(e)}")
-            return {
-                "document_id": f"DOC-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-                "document_type": "rate_lock_confirmation",
-                "status": "ERROR",
-                "error": str(e)
-            }
-    
-    def _generate_basic_confirmation_document(self, loan_context: Dict[str, Any], lock_submission: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate basic rate lock confirmation document."""
-        borrower_info = loan_context.get('borrower_info', {})
-        loan_details = loan_context.get('loan_details', {})
-        
-        document_content = f"""
-RATE LOCK CONFIRMATION
+            error_msg = f"Failed to process lock confirmation for loan '{loan_application_id}': {str(e)}"
+            logger.error(error_msg)
+            await self._send_exception_alert("TECHNICAL_ERROR", "high", error_msg, loan_application_id)
 
-Lock ID: {lock_submission.get('lock_id')}
-Date: {datetime.utcnow().strftime('%B %d, %Y')}
-
-Borrower: {borrower_info.get('name')}
-Loan Application ID: {loan_context.get('loan_application_id')}
-Loan Amount: ${loan_details.get('loan_amount'):,.2f}
-
-LOCKED RATE DETAILS:
-- Interest Rate: {lock_submission.get('rate')}%
-- Lock Period: {lock_submission.get('lock_term_days', 30)} days
-- Lock Expiration: {lock_submission.get('lock_expiration_date')}
-- Product: {loan_details.get('loan_type')} {loan_details.get('loan_term', 30)}-Year Fixed
-
-This rate lock is subject to the terms and conditions outlined in your loan documents.
-Please contact your loan officer with any questions.
-"""
-        
-        return {
-            "document_id": f"DOC-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-            "document_type": "rate_lock_confirmation",
-            "content": document_content,
-            "format": "text",
-            "generated_at": datetime.utcnow().isoformat()
-        }
-    
-    async def _send_lock_confirmations(self, loan_context: Dict[str, Any], lock_submission: Dict[str, Any], confirmation_document: Dict[str, Any]) -> Dict[str, Any]:
-        """Send lock confirmation notifications to all stakeholders."""
-        notification_results = {
-            "borrower_notified": False,
-            "loan_officer_notified": False,
-            "notification_method": [],
-            "errors": []
-        }
-        
-        try:
-            # Send confirmation to borrower
-            borrower_result = await self._send_borrower_confirmation(loan_context, lock_submission, confirmation_document)
-            notification_results["borrower_notified"] = borrower_result.get("success", False)
-            if not borrower_result.get("success"):
-                notification_results["errors"].append(f"Borrower notification failed: {borrower_result.get('error')}")
+    async def _send_confirmation_notifications(self, borrower_info, loan_officer_info, loan_id, lock_details, document):
+        """Sends messages to Service Bus to trigger confirmation emails."""
+        # Send to borrower
+        if borrower_info.get("email"):
+            subject = f"Rate Lock Confirmed for Loan {loan_id}"
+            body = self._create_email_body(borrower_info.get("name", "Borrower"), loan_id, lock_details)
             
-            # Send notification to loan officer
-            lo_result = await self._send_loan_officer_notification(loan_context, lock_submission)
-            notification_results["loan_officer_notified"] = lo_result.get("success", False)
-            if not lo_result.get("success"):
-                notification_results["errors"].append(f"Loan officer notification failed: {lo_result.get('error')}")
-            
-            notification_results["notification_method"] = ["email"]
-            
-        except Exception as e:
-            logger.error(f"Error sending confirmations: {str(e)}")
-            notification_results["errors"].append(str(e))
-        
-        return notification_results
-    
-    async def _send_borrower_confirmation(self, loan_context: Dict[str, Any], lock_submission: Dict[str, Any], confirmation_document: Dict[str, Any]) -> Dict[str, Any]:
-        """Send rate lock confirmation email to borrower."""
-        try:
-            if not self.email_service:
-                return {"success": False, "error": "Email service not configured"}
-            
-            borrower_info = loan_context.get('borrower_info', {})
-            borrower_email = borrower_info.get('email')
-            
-            if not borrower_email:
-                return {"success": False, "error": "Borrower email not available"}
-            
-            subject = f"Rate Lock Confirmed - Loan Application {loan_context.get('loan_application_id')}"
-            
-            body = f"""
-Dear {borrower_info.get('name', 'Borrower')},
+            # The attachment needs to be base64 encoded for the Logic App
+            attachment_payload = None
+            if document and document.get("content_base64"):
+                 attachment_payload = [{
+                    "Name": document.get("filename", "RateLockConfirmation.pdf"),
+                    "ContentBytes": document.get("content_base64")
+                }]
 
-Great news! Your rate lock has been successfully confirmed.
-
-LOCK DETAILS:
-- Lock ID: {lock_submission.get('lock_id')}
-- Interest Rate: {lock_submission.get('rate')}%
-- Lock Period: {lock_submission.get('lock_term_days', 30)} days
-- Lock Expires: {lock_submission.get('lock_expiration_date')}
-
-Your rate is now protected against market fluctuations until the lock expires.
-Please ensure all required documentation is submitted promptly to meet your closing timeline.
-
-Your loan officer will be in touch with next steps.
-
-Best regards,
-Mortgage Processing Team
-
----
-This is an automated message from the Rate Lock Processing System.
-"""
-            
-            await self.email_service.send_email(
-                to=borrower_email,
+            await self._send_email_notification(
+                recipient_email=borrower_info["email"],
                 subject=subject,
                 body=body,
-                attachments=[confirmation_document] if confirmation_document.get("content") else None
+                loan_id=loan_id,
+                attachments=attachment_payload
             )
-            
-            logger.info(f"Rate lock confirmation sent to borrower: {borrower_email}")
-            return {"success": True}
-            
-        except Exception as e:
-            logger.error(f"Error sending borrower confirmation: {str(e)}")
-            return {"success": False, "error": str(e)}
-    
-    async def _send_loan_officer_notification(self, loan_context: Dict[str, Any], lock_submission: Dict[str, Any]) -> Dict[str, Any]:
-        """Send rate lock notification to loan officer."""
-        try:
-            if not self.email_service:
-                return {"success": False, "error": "Email service not configured"}
-            
-            loan_officer = await self._get_loan_officer_info(loan_context)
-            
-            if not loan_officer or not loan_officer.get('email'):
-                return {"success": False, "error": "Loan officer email not available"}
-            
-            subject = f"Rate Lock Executed - {loan_context.get('loan_application_id')}"
-            
-            body = f"""
-Rate lock has been successfully executed for loan application {loan_context.get('loan_application_id')}.
-
-LOCK DETAILS:
-- Lock ID: {lock_submission.get('lock_id')}
-- Borrower: {loan_context.get('borrower_info', {}).get('name')}
-- Rate: {lock_submission.get('rate')}%
-- Lock Period: {lock_submission.get('lock_term_days', 30)} days
-- Expires: {lock_submission.get('lock_expiration_date')}
-
-The borrower has been notified of the confirmation.
-Please proceed with loan processing to meet the closing timeline.
-
----
-Automated Rate Lock Processing System
-"""
-            
-            await self.email_service.send_email(
-                to=loan_officer.get('email'),
+        
+        # Send to loan officer
+        if loan_officer_info.get("email"):
+            subject = f"ACTION: Rate Lock Executed for {loan_id}"
+            body = self._create_email_body(loan_officer_info.get("name", "Loan Officer"), loan_id, lock_details, is_lo=True)
+            await self._send_email_notification(
+                recipient_email=loan_officer_info["email"],
                 subject=subject,
-                body=body
+                body=body,
+                loan_id=loan_id
             )
-            
-            logger.info(f"Rate lock notification sent to loan officer: {loan_officer.get('email')}")
-            return {"success": True}
-            
+
+    async def _send_email_notification(self, recipient_email: str, subject: str, body: str, loan_id: str, attachments: list = None):
+        """Constructs and sends an email notification message to the outbound Service Bus topic."""
+        email_payload = {
+            "recipient_email": recipient_email,
+            "subject": subject,
+            "body": body,
+            "attachments": attachments or []
+        }
+        
+        await self.servicebus_plugin.send_message_to_topic(
+            topic_name="outbound_email",
+            message_type="send_email_notification",
+            loan_application_id=loan_id,
+            message_data=email_payload
+        )
+        logger.info(f"Sent email notification request to Service Bus for '{recipient_email}'")
+
+
+    def _create_email_body(self, recipient_name, loan_id, lock_details, is_lo=False):
+        """Creates a formatted email body."""
+        lock_expiration_str = lock_details.get('lock_expiration_date', 'N/A')
+        try:
+            # Format the date for readability
+            lock_expiration_date = datetime.fromisoformat(lock_expiration_str).strftime('%B %d, %Y')
+        except (ValueError, TypeError):
+            lock_expiration_date = lock_expiration_str
+
+        body = f"Dear {recipient_name},\n\n"
+        if is_lo:
+            body += f"A rate lock has been executed for loan application {loan_id}.\n\n"
+        else:
+            body += f"Great news! Your rate lock for loan application {loan_id} is confirmed.\n\n"
+        
+        body += "Here are the details:\n"
+        body += f"- Interest Rate: {lock_details.get('interest_rate')}%\n"
+        body += f"- Lock Period: {lock_details.get('lock_period_days')} days\n"
+        body += f"- Lock Expiration Date: {lock_expiration_date}\n"
+        body += f"- Confirmation ID: {lock_details.get('confirmation_id')}\n\n"
+        
+        if not is_lo:
+            body += "Your rate is now protected from market changes until the expiration date. Please work with your loan officer to complete any outstanding items.\n\n"
+        
+        body += "Thank you,\nThe Rate Lock Team"
+        return body
+
+    async def _send_audit_message(self, action: str, loan_application_id: str, audit_data: Dict[str, Any]):
+        try:
+            await self.servicebus_plugin.send_audit_message(
+                agent_name=self.agent_name,
+                action=action,
+                loan_application_id=loan_application_id,
+                audit_data=json.dumps(audit_data)
+            )
         except Exception as e:
-            logger.error(f"Error sending loan officer notification: {str(e)}")
-            return {"success": False, "error": str(e)}
-    
-    async def _get_loan_officer_info(self, loan_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Get loan officer information from context or LOS."""
-        # Try to get from context first
-        loan_officer = loan_context.get('loan_officer')
-        
-        if not loan_officer and self.los_service:
-            # Fetch from LOS if not in context
-            try:
-                loan_officer = await self.los_service.get_loan_officer(
-                    loan_context.get('loan_application_id')
-                )
-            except Exception as e:
-                logger.error(f"Error fetching loan officer info: {str(e)}")
-        
-        return loan_officer
+            logger.error(f"Failed to send audit message: {str(e)}")
+
+    async def _send_exception_alert(self, exception_type: str, priority: str, message: str, loan_application_id: str):
+        try:
+            exception_data = {
+                "agent": self.agent_name,
+                "error_message": message,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            await self.servicebus_plugin.send_exception_alert(
+                exception_type=exception_type,
+                priority=priority,
+                loan_application_id=loan_application_id,
+                exception_data=json.dumps(exception_data)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send exception alert: {str(e)}")
+
+    async def close(self):
+        if self._initialized:
+            if self.cosmos_plugin: await self.cosmos_plugin.close()
+            if self.servicebus_plugin: await self.servicebus_plugin.close()
+            if self.pricing_plugin: await self.pricing_plugin.close()
+            if self.los_plugin: await self.los_plugin.close()
+            if self.document_plugin: await self.document_plugin.close()
+        logger.info(f"{self.agent_name}: Resources cleaned up.")

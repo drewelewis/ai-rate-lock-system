@@ -23,8 +23,7 @@ def main():
     print(f"Cosmos Database: {azure_config.get_cosmosdb_database()}")
     print(f"Service Bus:     {azure_config.get_servicebus_endpoint()}")
     print(f"Service Bus NS:  {azure_config.get_servicebus_namespace()}")
-    print(f"App Insights:    {azure_config.get_application_insights_connection()[:50]}...")
-    
+
     print(f"\n🌍 Region: {azure_config.get_azure_location()}")
     print(f"💰 Subscription: {azure_config.get_azure_subscription_id()}")
     
