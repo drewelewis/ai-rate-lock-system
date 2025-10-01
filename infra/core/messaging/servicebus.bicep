@@ -14,6 +14,26 @@ param skuName string = 'Standard'
 @description('The principal ID to assign roles to')
 param principalId string = ''
 
+/*
+HYBRID SERVICE BUS ARCHITECTURE
+
+This template implements a hybrid messaging architecture combining:
+
+QUEUES (Point-to-Point):
+- inbound-email-queue: Logic Apps → Email Intake Agent
+- outbound-email-queue: Lock confirmations ready to send
+- high-priority-exceptions: Direct routing for urgent manual intervention
+
+TOPICS (Pub/Sub):
+- loan-lifecycle-events: Main workflow coordination between all agents
+- compliance-events: Compliance-specific events requiring special handling
+- audit-events: System-wide audit trail for all operations
+
+WHY HYBRID?
+- Queues: Reliable email processing, guaranteed single delivery, Logic Apps integration
+- Topics: Multi-agent coordination, audit trails, event broadcasting, loose coupling
+*/
+
 resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2021-11-01' = {
   name: name
   location: location
@@ -61,10 +81,28 @@ resource outboundEmailQueue 'Microsoft.ServiceBus/namespaces/queues@2021-11-01' 
   }
 }
 
-// Topics for internal agent coordination (separate from Logic Apps queues)
-resource workflowTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
+// High-priority exceptions queue for urgent issues
+resource exceptionQueue 'Microsoft.ServiceBus/namespaces/queues@2021-11-01' = {
   parent: serviceBusNamespace
-  name: 'agent-workflow'
+  name: 'high-priority-exceptions'
+  properties: {
+    maxMessageSizeInKilobytes: 256
+    defaultMessageTimeToLive: 'P7D' // 7 days for compliance
+    maxSizeInMegabytes: 1024
+    duplicateDetectionHistoryTimeWindow: 'PT10M'
+    requiresDuplicateDetection: true
+    enablePartitioning: false
+    lockDuration: 'PT5M' // Longer lock for manual intervention
+    maxDeliveryCount: 3
+    deadLetteringOnMessageExpiration: true
+    enableBatchedOperations: true
+  }
+}
+
+// Topics for internal agent coordination (hybrid architecture)
+resource loanLifecycleTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
+  parent: serviceBusNamespace
+  name: 'loan-lifecycle-events'
   properties: {
     maxMessageSizeInKilobytes: 256
     defaultMessageTimeToLive: 'P1D' // 1 day
@@ -76,10 +114,25 @@ resource workflowTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
   }
 }
 
+// Compliance-specific topic for regulatory events
+resource complianceTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
+  parent: serviceBusNamespace
+  name: 'compliance-events'
+  properties: {
+    maxMessageSizeInKilobytes: 256
+    defaultMessageTimeToLive: 'P7D' // 7 days for compliance
+    maxSizeInMegabytes: 1024
+    duplicateDetectionHistoryTimeWindow: 'PT10M'
+    requiresDuplicateDetection: true
+    enablePartitioning: false
+    supportOrdering: true
+  }
+}
+
 // Audit topic for comprehensive logging
 resource auditTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
   parent: serviceBusNamespace
-  name: 'audit-logging'
+  name: 'audit-events'
   properties: {
     maxMessageSizeInKilobytes: 256
     defaultMessageTimeToLive: 'P7D' // 7 days
@@ -90,25 +143,10 @@ resource auditTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
   }
 }
 
-// Exception topic for human escalation alerts
-resource exceptionTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
-  parent: serviceBusNamespace
-  name: 'exception-alerts'
-  properties: {
-    maxMessageSizeInKilobytes: 256
-    defaultMessageTimeToLive: 'P1D' // 1 day
-    maxSizeInMegabytes: 1024
-    duplicateDetectionHistoryTimeWindow: 'PT10M'
-    requiresDuplicateDetection: true
-    enablePartitioning: false
-    supportOrdering: true
-  }
-}
-
-// Agent subscriptions with proper filters
+// Agent subscriptions for loan lifecycle events
 resource emailIntakeSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
-  parent: workflowTopic
-  name: 'email-intake-agent'
+  parent: loanLifecycleTopic
+  name: 'email-intake-subscription'
   properties: {
     maxDeliveryCount: 3
     defaultMessageTimeToLive: 'P1D'
@@ -119,8 +157,8 @@ resource emailIntakeSubscription 'Microsoft.ServiceBus/namespaces/topics/subscri
 }
 
 resource loanContextSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
-  parent: workflowTopic
-  name: 'loan-context-agent'
+  parent: loanLifecycleTopic
+  name: 'loan-context-subscription'
   properties: {
     maxDeliveryCount: 3
     defaultMessageTimeToLive: 'P1D'
@@ -131,8 +169,8 @@ resource loanContextSubscription 'Microsoft.ServiceBus/namespaces/topics/subscri
 }
 
 resource rateQuoteSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
-  parent: workflowTopic
-  name: 'rate-quote-agent'
+  parent: loanLifecycleTopic
+  name: 'rate-quote-subscription'
   properties: {
     maxDeliveryCount: 3
     defaultMessageTimeToLive: 'P1D'
@@ -143,8 +181,8 @@ resource rateQuoteSubscription 'Microsoft.ServiceBus/namespaces/topics/subscript
 }
 
 resource complianceSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
-  parent: workflowTopic
-  name: 'compliance-risk-agent'
+  parent: loanLifecycleTopic
+  name: 'compliance-subscription'
   properties: {
     maxDeliveryCount: 3
     defaultMessageTimeToLive: 'P1D'
@@ -155,8 +193,8 @@ resource complianceSubscription 'Microsoft.ServiceBus/namespaces/topics/subscrip
 }
 
 resource lockConfirmationSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
-  parent: workflowTopic
-  name: 'lock-confirmation-agent'
+  parent: loanLifecycleTopic
+  name: 'lock-confirmation-subscription'
   properties: {
     maxDeliveryCount: 3
     defaultMessageTimeToLive: 'P1D'
@@ -166,10 +204,10 @@ resource lockConfirmationSubscription 'Microsoft.ServiceBus/namespaces/topics/su
   }
 }
 
-// Audit and exception subscriptions
+// Audit subscription for comprehensive logging
 resource auditLoggingSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
   parent: auditTopic
-  name: 'audit-logging-agent'
+  name: 'audit-logging-subscription'
   properties: {
     maxDeliveryCount: 5
     defaultMessageTimeToLive: 'P7D'
@@ -179,11 +217,24 @@ resource auditLoggingSubscription 'Microsoft.ServiceBus/namespaces/topics/subscr
   }
 }
 
-resource exceptionHandlerSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
-  parent: exceptionTopic
-  name: 'exception-handler-agent'
+// Additional compliance subscriptions for regulatory events
+resource complianceAuditSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
+  parent: complianceTopic
+  name: 'compliance-audit-subscription'
   properties: {
     maxDeliveryCount: 5
+    defaultMessageTimeToLive: 'P7D'
+    lockDuration: 'PT1M'
+    deadLetteringOnMessageExpiration: true
+    deadLetteringOnFilterEvaluationExceptions: true
+  }
+}
+
+resource complianceExceptionSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
+  parent: complianceTopic
+  name: 'compliance-exception-subscription'
+  properties: {
+    maxDeliveryCount: 3
     defaultMessageTimeToLive: 'P1D'
     lockDuration: 'PT5M'
     deadLetteringOnMessageExpiration: true
@@ -191,13 +242,13 @@ resource exceptionHandlerSubscription 'Microsoft.ServiceBus/namespaces/topics/su
   }
 }
 
-resource humanNotificationSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
-  parent: exceptionTopic
-  name: 'human-notifications'
+resource exceptionHandlerSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
+  parent: auditTopic
+  name: 'exception-handler-subscription'
   properties: {
-    maxDeliveryCount: 10
+    maxDeliveryCount: 5
     defaultMessageTimeToLive: 'P1D'
-    lockDuration: 'PT30S'
+    lockDuration: 'PT5M'
     deadLetteringOnMessageExpiration: true
     deadLetteringOnFilterEvaluationExceptions: true
   }

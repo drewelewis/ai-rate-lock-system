@@ -37,6 +37,38 @@ class AzureConfig:
         """Get Service Bus namespace"""
         return os.getenv('AZURE_SERVICEBUS_NAMESPACE_NAME', os.getenv('AZURE_SERVICE_BUS_NAMESPACE'))
     
+    def get_servicebus_queue_inbound_email(self) -> str:
+        """Get inbound email queue name"""
+        return os.getenv('AZURE_SERVICEBUS_QUEUE_INBOUND_EMAIL', 'inbound-email-queue')
+    
+    def get_servicebus_queue_outbound_confirmations(self) -> str:
+        """Get outbound confirmations queue name"""
+        return os.getenv('AZURE_SERVICEBUS_QUEUE_OUTBOUND_CONFIRMATIONS', 'outbound-email-queue')
+    
+    def get_servicebus_queue_high_priority_exceptions(self) -> str:
+        """Get high priority exceptions queue name"""
+        return os.getenv('AZURE_SERVICEBUS_QUEUE_HIGH_PRIORITY_EXCEPTIONS', 'high-priority-exceptions')
+    
+    def get_servicebus_topic_agent_workflow(self) -> str:
+        """Get agent workflow topic name"""
+        return os.getenv('AZURE_SERVICEBUS_TOPIC_AGENT_WORKFLOW', 'agent-workflow')
+    
+    def get_servicebus_topic_audit_events(self) -> str:
+        """Get audit events topic name"""
+        return os.getenv('AZURE_SERVICEBUS_TOPIC_AUDIT_EVENTS', 'audit-events')
+    
+    def get_servicebus_topic_audit_logging(self) -> str:
+        """Get audit logging topic name"""
+        return os.getenv('AZURE_SERVICEBUS_TOPIC_AUDIT_LOGGING', 'audit-logging')
+    
+    def get_servicebus_topic_exception_alerts(self) -> str:
+        """Get exception alerts topic name"""
+        return os.getenv('AZURE_SERVICEBUS_TOPIC_EXCEPTION_ALERTS', 'exception-alerts')
+    
+    def get_servicebus_topic_workflow_events(self) -> str:
+        """Get workflow events topic name"""
+        return os.getenv('AZURE_SERVICEBUS_TOPIC_WORKFLOW_EVENTS', 'workflow-events')
+    
     def get_container_registry(self) -> str:
         """Get Container Registry endpoint"""
         return os.getenv('AZURE_CONTAINER_REGISTRY_ENDPOINT')

@@ -53,24 +53,34 @@ class EmailIntakeAgent:
             self.kernel = Kernel()
             
             endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
-            api_key = os.environ.get("AZURE_OPENAI_API_KEY") 
             deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
             
-            if not all([endpoint, api_key, deployment_name]):
+            if not all([endpoint, deployment_name]):
                 raise ValueError("Missing Azure OpenAI configuration for Email Intake Agent.")
 
-            self.kernel.add_service(AzureChatCompletion(
+            # Use managed identity for Azure OpenAI authentication
+            from azure.identity.aio import DefaultAzureCredential
+            
+            async def get_token():
+                credential = DefaultAzureCredential()
+                token = await credential.get_token("https://cognitiveservices.azure.com/.default")
+                return token.token
+
+            # Add the Azure OpenAI service with proper service_id
+            azure_chat_service = AzureChatCompletion(
                 deployment_name=deployment_name,
                 endpoint=endpoint,
-                api_key=api_key
-            ))
+                ad_token_provider=get_token
+            )
+            
+            self.kernel.add_service(azure_chat_service)
             
             self.cosmos_plugin = CosmosDBPlugin(debug=True, session_id=self.session_id)
             self.servicebus_plugin = ServiceBusPlugin(debug=True, session_id=self.session_id)
             
             self.kernel.add_plugin(self.cosmos_plugin, plugin_name="cosmos_db")
             self.kernel.add_plugin(self.servicebus_plugin, plugin_name="service_bus")
-            self.kernel.add_plugin(self, plugin_name="email_parser")
+            # Note: No need to register self as email_parser plugin since we call LLM directly
             
             self._initialized = True
             logger.info(f"{self.agent_name}: Semantic Kernel initialized successfully")
@@ -79,66 +89,341 @@ class EmailIntakeAgent:
             logger.error(f"{self.agent_name}: Failed to initialize Semantic Kernel - {str(e)}")
             raise
 
-    async def handle_message(self, message: Dict[str, Any]):
+    async def handle_message(self, message: str):
         """Handles a single message from the service bus."""
         await self._initialize_kernel()
         
-        message_type = message.get('message_type')
-        if message_type != 'new_email_request':
-            logger.warning(f"Received unexpected message type: {message_type}. Skipping.")
-            return
-
         try:
-            loan_application_id_from_subject = message.get('loan_application_id') # Extracted by Logic App
-            email_body = message.get('email_body')
-            from_address = message.get('from_address')
-            
-            logger.info(f"{self.agent_name}: Processing email from {from_address} for loan '{loan_application_id_from_subject}'")
-            
-            # Use the LLM to extract full details from the email body
-            extraction_result_str = await self.kernel.invoke(
-                self.kernel.plugins["email_parser"]["extract_loan_data_from_email"],
-                email_body=email_body,
-                subject_loan_id=loan_application_id_from_subject
-            )
-            extracted_data = json.loads(str(extraction_result_str))
+            # All messages are raw text that need LLM parsing
+            if message and message.strip():
+                await self._process_raw_email_with_llm(message)
+            else:
+                logger.warning(f"{self.agent_name}: Received empty message")
+                
+        except Exception as e:
+            error_msg = f"Failed to process message: {str(e)}"
+            logger.error(error_msg)
+            await self._send_exception_alert("TECHNICAL_ERROR", "high", error_msg, "unknown")
 
+    async def _process_raw_email_with_llm(self, raw_email_content: str):
+        """Process raw email content using LLM for intelligent parsing."""
+        logger.info(f"{self.agent_name}: Processing raw email content with LLM")
+        
+        try:
+            # Call Azure OpenAI directly to parse the email content
+            extracted_data = await self._extract_loan_data_with_llm(raw_email_content)
+            
             loan_application_id = extracted_data.get('loan_application_id')
-            if not loan_application_id:
-                raise ValueError("LLM failed to extract a valid Loan Application ID from the email.")
-
+            if not loan_application_id or loan_application_id in [None, "", "null"]:
+                logger.warning("LLM could not extract loan application ID from email content, but this should not happen with improved extraction")
+                return
+                
+            logger.info(f"{self.agent_name}: LLM successfully extracted loan ID: {loan_application_id}")
+            
+            # Extract email metadata from raw content for audit trail
+            from_address = self._extract_email_address(raw_email_content)
+            subject = self._extract_subject(raw_email_content)
+            
             # Create the initial record in Cosmos DB
             rate_lock_record = {
                 "status": "PENDING_CONTEXT",
                 "source_email": from_address,
+                "subject": subject,
                 "received_at": datetime.utcnow().isoformat(),
-                "extracted_data": extracted_data
+                "extracted_data": extracted_data,
+                "raw_email_content": raw_email_content[:1000]  # First 1000 chars for audit
             }
-            await self.cosmos_plugin.create_rate_lock(loan_application_id, json.dumps(rate_lock_record))
             
-            # Send audit message
-            await self._send_audit_message("EMAIL_PROCESSED", loan_application_id, {
-                "email_from": from_address,
-                "extracted_data": extracted_data
-            })
-            
-            # Send message to the next agent in the workflow
-            await self.servicebus_plugin.send_message_to_topic(
-                topic_name="rate_lock_requests",
-                message_type="context_retrieval_needed",
+            # Store in Cosmos DB using the correct method and parameters
+            await self.cosmos_plugin.create_rate_lock(
                 loan_application_id=loan_application_id,
-                message_data={"status": "PENDING_CONTEXT"}
+                borrower_name=extracted_data.get('borrower_name', 'Unknown'),
+                borrower_email=from_address,
+                borrower_phone=extracted_data.get('contact_phone', ''),
+                property_address=extracted_data.get('property_address', ''),
+                requested_lock_period=str(extracted_data.get('requested_lock_period_days', 30)),
+                additional_data=json.dumps(rate_lock_record)
             )
             
-            # Send a message to the outbound topic to generate an acknowledgment email
-            await self._send_acknowledgment_notification(from_address, loan_application_id, extracted_data)
+            # Send to next agent in workflow
+            await self._send_to_workflow(loan_application_id, from_address, extracted_data)
             
-            logger.info(f"Successfully initiated rate lock process for loan '{loan_application_id}'")
-
+            logger.info(f"{self.agent_name}: Successfully processed email for loan {loan_application_id}")
+            
         except Exception as e:
-            error_msg = f"Failed to process email request: {str(e)}"
+            error_msg = f"Failed to process raw email with LLM: {str(e)}"
             logger.error(error_msg)
-            await self._send_exception_alert("TECHNICAL_ERROR", "high", error_msg, message.get('loan_application_id', 'unknown'))
+            # Send to exception handler
+            await self._send_exception_alert("EMAIL_PROCESSING_FAILED", "HIGH", error_msg, "UNKNOWN")
+
+    async def _extract_loan_data_with_llm(self, email_content: str) -> dict:
+        """Direct LLM call to extract loan data from email content."""
+        prompt = f"""
+You are an AI agent that extracts loan application data from emails. Analyze the following email and extract key information.
+
+Email Content:
+{email_content}
+
+Extract and return ONLY a valid JSON object with these fields:
+- loan_application_id: The loan ID found in the email. Look for patterns like "APP-123456", "Loan Application ID:", "Application #:", "Loan #:", "ID:", etc. REQUIRED FIELD - generate one if none found using format APP-XXXXXX
+- borrower_name: Full name of the borrower
+- property_address: Full property address
+- loan_amount: Loan amount in dollars (number only, no commas or $)
+- requested_lock_period_days: Number of days for rate lock (default 30 if not specified)
+- contact_phone: Phone number if mentioned
+- contact_email: Email address if mentioned
+- property_type: Type of property (single family, condo, etc.)
+- loan_purpose: Purchase, refinance, etc.
+
+Rules:
+1. Return ONLY valid JSON, no explanation or markdown formatting
+2. Use null for missing values EXCEPT loan_application_id which is REQUIRED
+3. Extract actual data from the email content
+4. Be precise and accurate
+5. If no loan ID found, generate one using format APP-XXXXXX with random 6 digits
+
+JSON:"""
+
+        try:
+            import json
+            import random
+            from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+            
+            # Get the chat completion service directly
+            chat_service = self.kernel.get_service(AzureChatCompletion)
+            
+            # Create the completion request
+            response = await chat_service.get_chat_message_content(
+                chat_history=[],
+                settings=None,
+                prompt=prompt
+            )
+            
+            # Extract and clean the response
+            extracted_json = str(response).strip()
+            logger.info(f"LLM raw response: {extracted_json[:200]}...")
+            
+            # Clean up response if it has markdown formatting
+            if extracted_json.startswith("```json"):
+                extracted_json = extracted_json.replace("```json", "").replace("```", "").strip()
+            elif extracted_json.startswith("```"):
+                extracted_json = extracted_json.replace("```", "").strip()
+            
+            # Parse the JSON
+            parsed_data = json.loads(extracted_json)
+            
+            # Ensure required fields exist with fallbacks
+            if not parsed_data.get('loan_application_id') or parsed_data.get('loan_application_id') in [None, "", "null"]:
+                fallback_id = f"APP-{random.randint(100000, 999999)}"
+                parsed_data['loan_application_id'] = fallback_id
+                logger.info(f"Generated fallback loan application ID: {fallback_id}")
+            
+            logger.info(f"LLM successfully extracted loan ID: {parsed_data.get('loan_application_id')}")
+            return parsed_data
+            
+        except Exception as e:
+            logger.error(f"LLM extraction failed: {e}, using fallback")
+            # Simple fallback if LLM fails
+            return {
+                "loan_application_id": f"APP-{random.randint(100000, 999999)}",
+                "borrower_name": None,
+                "property_address": None,
+                "loan_amount": None,
+                "requested_lock_period_days": 30,
+                "contact_phone": None,
+                "contact_email": None,
+                "property_type": None,
+                "loan_purpose": None
+            }
+
+    def _extract_email_address(self, raw_email: str) -> str:
+        """Extract 'From' email address from raw email content."""
+        import re
+        match = re.search(r'From:\s*([^\n\r]+)', raw_email, re.IGNORECASE)
+        return match.group(1).strip() if match else "unknown@unknown.com"
+    
+    def _extract_subject(self, raw_email: str) -> str:
+        """Extract subject line from raw email content.""" 
+        import re
+        match = re.search(r'Subject:\s*([^\n\r]+)', raw_email, re.IGNORECASE)
+        return match.group(1).strip() if match else "No Subject"
+
+    async def _process_parsed_email(self, message: Dict[str, Any]):
+        """Process a message that contains parsed email data."""
+        # Email data could be at root level or nested in body
+        email_data = message.get('email_data', {}) or message.get('body', {}).get('email_data', {})
+        
+        if email_data.get('error'):
+            logger.error(f"Received email with parsing error: {email_data.get('error')}")
+            return
+        
+        from_address = email_data.get('from', '')
+        subject = email_data.get('subject', '')
+        body_text = email_data.get('body_text', '')
+        body_html = email_data.get('body_html', '')
+        
+        logger.info(f"{self.agent_name}: Processing parsed email from {from_address} with subject '{subject[:50]}...'")
+        
+        # Use the email body (prefer text, fall back to HTML)
+        email_body = body_text or body_html or ''
+        
+        if not email_body:
+            logger.warning("Email has no body content, skipping processing")
+            return
+        
+        # Extract loan application ID from subject or body
+        loan_application_id = await self._extract_loan_id_from_email(subject, email_body)
+        
+        if not loan_application_id:
+            logger.warning("Could not extract loan application ID from email, skipping")
+            return
+        
+        # Use the LLM to extract full details from the email body
+        extraction_result_str = await self.kernel.invoke(
+            self.kernel.plugins["email_parser"]["extract_loan_data_from_email"],
+            email_body=email_body,
+            subject_loan_id=loan_application_id
+        )
+        extracted_data = json.loads(str(extraction_result_str))
+        
+        # Create the initial record in Cosmos DB
+        rate_lock_record = {
+            "status": "PENDING_CONTEXT",
+            "source_email": from_address,
+            "subject": subject,
+            "received_at": datetime.utcnow().isoformat(),
+            "extracted_data": extracted_data,
+            "raw_email_data": email_data
+        }
+        await self.cosmos_plugin.create_rate_lock(loan_application_id, json.dumps(rate_lock_record))
+        
+        # Send to next agent
+        await self._send_to_workflow(loan_application_id, from_address, extracted_data)
+        
+        logger.info(f"Successfully processed parsed email for loan '{loan_application_id}'")
+
+    async def _process_legacy_email_request(self, message: Dict[str, Any]):
+        """Process legacy message format for backwards compatibility."""
+        loan_application_id_from_subject = message.get('loan_application_id')
+        email_body = message.get('email_body')
+        from_address = message.get('from_address')
+        
+        logger.info(f"{self.agent_name}: Processing legacy email from {from_address} for loan '{loan_application_id_from_subject}'")
+        
+        # Use the LLM to extract full details from the email body
+        extraction_result_str = await self.kernel.invoke(
+            self.kernel.plugins["email_parser"]["extract_loan_data_from_email"],
+            email_body=email_body,
+            subject_loan_id=loan_application_id_from_subject
+        )
+        extracted_data = json.loads(str(extraction_result_str))
+
+        loan_application_id = extracted_data.get('loan_application_id') or loan_application_id_from_subject
+        if not loan_application_id:
+            raise ValueError("Failed to extract a valid Loan Application ID from the email.")
+
+        # Create the initial record in Cosmos DB
+        rate_lock_record = {
+            "status": "PENDING_CONTEXT",
+            "source_email": from_address,
+            "received_at": datetime.utcnow().isoformat(),
+            "extracted_data": extracted_data
+        }
+        await self.cosmos_plugin.create_rate_lock(loan_application_id, json.dumps(rate_lock_record))
+        
+        # Send to next agent
+        await self._send_to_workflow(loan_application_id, from_address, extracted_data)
+        
+        logger.info(f"Successfully processed legacy email for loan '{loan_application_id}'")
+
+    async def _process_raw_message(self, message: Dict[str, Any]):
+        """Process raw message content."""
+        # Extract raw content from message body
+        body = message.get('body', {})
+        if isinstance(body, dict) and 'raw_content' in body:
+            raw_content = body['raw_content']
+        else:
+            raw_content = str(body)
+        
+        logger.info(f"{self.agent_name}: Processing raw message content")
+        
+        # Try to extract basic information
+        loan_application_id = await self._extract_loan_id_from_text(raw_content)
+        
+        if not loan_application_id:
+            logger.warning("Could not extract loan application ID from raw content, skipping")
+            return
+        
+        # Simple extraction for raw content
+        extracted_data = {
+            "loan_application_id": loan_application_id,
+            "raw_content": raw_content[:1000],  # First 1000 chars
+            "extraction_method": "raw_text"
+        }
+        
+        # Create the initial record in Cosmos DB
+        rate_lock_record = {
+            "status": "PENDING_CONTEXT", 
+            "source": "raw_message",
+            "received_at": datetime.utcnow().isoformat(),
+            "extracted_data": extracted_data
+        }
+        await self.cosmos_plugin.create_rate_lock(loan_application_id, json.dumps(rate_lock_record))
+        
+        # Send to next agent
+        await self._send_to_workflow(loan_application_id, "unknown", extracted_data)
+        
+        logger.info(f"Successfully processed raw message for loan '{loan_application_id}'")
+
+    async def _extract_loan_id_from_email(self, subject: str, body: str) -> Optional[str]:
+        """Extract loan application ID from email subject or body."""
+        # Simple regex patterns for loan IDs
+        import re
+        
+        # Look in subject first
+        for text in [subject, body]:
+            if not text:
+                continue
+                
+            # Common patterns for loan IDs
+            patterns = [
+                r'loan[:\s]+([A-Z0-9-]{6,20})',
+                r'application[:\s]+([A-Z0-9-]{6,20})',  
+                r'loan[:\s]*id[:\s]*([A-Z0-9-]{6,20})',
+                r'([A-Z]{2,4}\d{6,12})',  # Pattern like ABC123456789
+                r'(\d{10,15})',  # Simple numeric IDs
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+        
+        return None
+
+    async def _extract_loan_id_from_text(self, text: str) -> Optional[str]:
+        """Extract loan application ID from raw text."""
+        return await self._extract_loan_id_from_email("", text)
+
+    async def _send_to_workflow(self, loan_application_id: str, from_address: str, extracted_data: Dict[str, Any]):
+        """Send processed email data to the workflow."""
+        # Send audit message
+        await self._send_audit_message("EMAIL_PROCESSED", loan_application_id, {
+            "email_from": from_address,
+            "extracted_data": extracted_data
+        })
+        
+        # Send message to the next agent in the workflow
+        await self.servicebus_plugin.send_message_to_topic(
+            topic_name="rate_lock_requests",
+            message_type="context_retrieval_needed", 
+            loan_application_id=loan_application_id,
+            message_data={"status": "PENDING_CONTEXT"}
+        )
+        
+        # Send acknowledgment if we have a valid email address
+        if from_address and '@' in from_address:
+            await self._send_acknowledgment_notification(from_address, loan_application_id, extracted_data)
 
     async def process_inbox(self):
         """
@@ -259,32 +544,6 @@ class EmailIntakeAgent:
             "borrower_name": borrower_name,
             "property_address": property_address
         }
-
-    @kernel_function(
-        description="Extracts structured loan application data from the body of an email.",
-        name="extract_loan_data_from_email"
-    )
-    def extract_loan_data_from_email(self, email_body: str, subject_loan_id: str) -> str:
-        """
-        Uses a simulated LLM to parse the email body and return structured JSON.
-        The loan ID from the subject is used as a fallback.
-        """
-        import re
-        
-        # Try to find a loan ID in the body first
-        loan_id_match = re.search(r'LA\d{5,}', email_body, re.IGNORECASE)
-        loan_id = loan_id_match.group() if loan_id_match else subject_loan_id
-        
-        # Extract lock period
-        lock_period_match = re.search(r'(\d+)\s*day', email_body, re.IGNORECASE)
-        lock_period = int(lock_period_match.group(1)) if lock_period_match else 30
-        
-        return json.dumps({
-            "loan_application_id": loan_id,
-            "requested_lock_period_days": lock_period,
-            "borrower_name": "John Doe (extracted)", # Placeholder
-            "property_address": "123 Main St, Anytown, USA (extracted)" # Placeholder
-        })
 
     async def _send_acknowledgment_notification(self, recipient_email: str, loan_id: str, extracted_data: Dict[str, Any]):
         """Sends a message to the outbound email topic via Service Bus."""

@@ -18,7 +18,7 @@ from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
 from plugins.cosmos_db_plugin import CosmosDBPlugin
 from plugins.service_bus_plugin import ServiceBusPlugin
 from plugins.pricing_engine_plugin import PricingEnginePlugin
-from plugins.los_plugin import LOSPlugin
+from plugins.los_plugin import LoanOriginationSystemPlugin
 from plugins.document_plugin import DocumentPlugin
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ class LockConfirmationAgent:
             self.cosmos_plugin = CosmosDBPlugin(debug=True, session_id=self.session_id)
             self.servicebus_plugin = ServiceBusPlugin(debug=True, session_id=self.session_id)
             self.pricing_plugin = PricingEnginePlugin(debug=True, session_id=self.session_id)
-            self.los_plugin = LOSPlugin(debug=True, session_id=self.session_id)
+            self.los_plugin = LoanOriginationSystemPlugin(debug=True, session_id=self.session_id)
             self.document_plugin = DocumentPlugin(debug=True, session_id=self.session_id)
             
             self.kernel.add_plugin(self.cosmos_plugin, plugin_name="cosmos_db")

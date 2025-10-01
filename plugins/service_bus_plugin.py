@@ -245,9 +245,6 @@ class ServiceBusPlugin:
     async def close(self):
         """
         Clean up resources when the plugin is no longer needed.
+        Note: ServiceBusOperations uses per-operation clients, so no cleanup needed.
         """
-        try:
-            await servicebus_operations.close()
-            print("Service Bus plugin resources cleaned up")
-        except Exception as e:
-            print(f"Error during Service Bus plugin cleanup: {e}")
+        print("Service Bus plugin resources cleaned up")

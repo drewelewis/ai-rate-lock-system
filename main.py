@@ -42,12 +42,44 @@ logging.basicConfig(
     force=True  # Force reconfiguration
 )
 
+# Reduce Azure SDK noise while keeping important messages
+azure_loggers = [
+    'azure.servicebus._pyamqp',
+    'azure.servicebus.aio._base_handler_async',
+    'azure.servicebus._common.utils',
+    'azure.servicebus.aio._servicebus_receiver_async',
+    'azure.servicebus.aio._servicebus_sender_async',
+    'azure.core.pipeline.policies.http_logging_policy',
+    'azure.identity.aio._credentials',
+    'azure.identity.aio._internal'
+]
+
+for azure_logger_name in azure_loggers:
+    azure_logger = logging.getLogger(azure_logger_name)
+    azure_logger.setLevel(logging.WARNING)  # Only show warnings and errors
+
+# Keep important Azure Service Bus logs at INFO level
+important_azure_loggers = [
+    'azure.servicebus',
+    'azure.identity'
+]
+for logger_name in important_azure_loggers:
+    if not any(logger_name.startswith(noisy) for noisy in azure_loggers):
+        logging.getLogger(logger_name).setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 # Import agents
 from agents.email_intake_agent import EmailIntakeAgent
 from agents.rate_quote_agent import RateQuoteAgent
+from agents.loan_context_agent import LoanApplicationContextAgent
+from agents.compliance_risk_agent import ComplianceRiskAgent
+from agents.lock_confirmation_agent import LockConfirmationAgent
+from agents.audit_logging_agent import AuditLoggingAgent
+from agents.exception_handler_agent import ExceptionHandlerAgent
 from operations.service_bus_operations import ServiceBusOperations
+from operations.service_bus_singleton import close_service_bus_connection
+from config.azure_config import AzureConfig
 
 class AIRateLockSystem:
     """
@@ -62,17 +94,52 @@ class AIRateLockSystem:
         self.running = False
         self.startup_time = datetime.now()
         
-        # Agent configurations
+        # Initialize Azure config
+        self.azure_config = AzureConfig()
+        
+        # Agent configurations - using environment-based topic/queue names
         self.agent_configs = {
             'email_intake': {
                 'class': EmailIntakeAgent,
-                'topics': ['inbound-email-processor'],
-                'subscription': 'email-intake-subscription'
+                'queues': [self.azure_config.get_servicebus_queue_inbound_email()],
+                'topics': [self.azure_config.get_servicebus_topic_agent_workflow()],
+                'subscription': 'email-intake-agent'
+            },
+            'loan_context': {
+                'class': LoanApplicationContextAgent,
+                'queues': [],
+                'topics': [self.azure_config.get_servicebus_topic_agent_workflow()],
+                'subscription': 'loan-context-agent'
             },
             'rate_quote': {
                 'class': RateQuoteAgent,
-                'topics': ['workflow-coordination'],
-                'subscription': 'rate-quote-subscription'
+                'queues': [],
+                'topics': [self.azure_config.get_servicebus_topic_agent_workflow()],
+                'subscription': 'rate-quote-agent'
+            },
+            'compliance_risk': {
+                'class': ComplianceRiskAgent,
+                'queues': [],
+                'topics': [self.azure_config.get_servicebus_topic_agent_workflow(), self.azure_config.get_servicebus_topic_workflow_events()],
+                'subscription': 'compliance-risk-agent'
+            },
+            'lock_confirmation': {
+                'class': LockConfirmationAgent,
+                'queues': [self.azure_config.get_servicebus_queue_outbound_confirmations()],
+                'topics': [self.azure_config.get_servicebus_topic_agent_workflow()],
+                'subscription': 'lock-confirmation-agent'
+            },
+            'audit_logging': {
+                'class': AuditLoggingAgent,
+                'queues': [],
+                'topics': [self.azure_config.get_servicebus_topic_audit_events(), self.azure_config.get_servicebus_topic_audit_logging()],
+                'subscription': 'audit-logging-agent'
+            },
+            'exception_handler': {
+                'class': ExceptionHandlerAgent,
+                'queues': [self.azure_config.get_servicebus_queue_high_priority_exceptions()],
+                'topics': [self.azure_config.get_servicebus_topic_exception_alerts()],
+                'subscription': 'exception-handler-agent'
             }
         }
 
@@ -133,24 +200,62 @@ class AIRateLockSystem:
         agent_instance = agent_data['instance']
         config = agent_data['config']
         
-        logger.info(f"🔄 {agent_name} listener started - monitoring topics: {config['topics']}")
+        topics = config.get('topics', [])
+        queues = config.get('queues', [])
+        poll_count = 0
+        
+        logger.info(f"🔄 {agent_name} listener started - monitoring topics: {topics}, queues: {queues}")
         
         while self.running:
             try:
+                poll_count += 1
+                messages_found = False
+                
+                # Show periodic heartbeat for visibility (every 12th poll = ~1 minute)
+                if poll_count % 12 == 0:
+                    logger.info(f"💓 {agent_name} listener active - poll #{poll_count}")
+                
                 # Check for messages from Service Bus topics
-                for topic in config['topics']:
+                for topic in topics:
                     messages = await self._check_for_messages(topic, config['subscription'])
                     
-                    for message in messages:
-                        logger.info(f"📨 {agent_name} received message from {topic}")
-                        
-                        # Route message to appropriate agent handler
-                        if agent_name == 'email_intake':
-                            await agent_instance.handle_message(message)
-                        elif agent_name == 'rate_quote':
-                            await agent_instance.handle_message(message)
-                        
-                        logger.info(f"✅ {agent_name} processed message successfully")
+                    if messages:
+                        messages_found = True
+                        for message in messages:
+                            logger.info(f"📨 {agent_name} received message from topic {topic}")
+                            
+                            # Route message to appropriate agent handler
+                            if agent_name == 'email_intake':
+                                # Extract raw message body for LLM processing
+                                message_body = message.get('body', str(message))
+                                await agent_instance.handle_message(message_body)
+                            elif agent_name == 'rate_quote':
+                                await agent_instance.handle_message(message)
+                            
+                            logger.info(f"✅ {agent_name} processed message successfully")
+                
+                # Check for messages from Service Bus queues
+                for queue in queues:
+                    messages = await self._check_for_queue_messages(queue)
+                    
+                    if messages:
+                        messages_found = True
+                        for message in messages:
+                            logger.info(f"📨 {agent_name} received message from queue {queue}")
+                            
+                            # Route message to appropriate agent handler
+                            if agent_name == 'email_intake':
+                                # Extract raw message body for LLM processing
+                                message_body = message.get('body', str(message))
+                                await agent_instance.handle_message(message_body)
+                            elif agent_name == 'rate_quote':
+                                await agent_instance.handle_message(message)
+                            
+                            logger.info(f"✅ {agent_name} processed message successfully")
+                
+                # If no messages found, show debug info only for first few polls
+                if not messages_found and poll_count <= 3:
+                    logger.debug(f"📭 {agent_name} poll #{poll_count}: No messages in topics {topics} or queues {queues}")
                 
                 # Small delay to prevent excessive polling
                 await asyncio.sleep(5)
@@ -173,6 +278,21 @@ class AIRateLockSystem:
             
         except Exception as e:
             logger.debug(f"No messages available from {topic}/{subscription}: {str(e)}")
+            return []
+
+    async def _check_for_queue_messages(self, queue: str) -> List[Dict[str, Any]]:
+        """Check for messages from Service Bus queue."""
+        try:
+            # This would connect to actual Service Bus in production
+            # For now, return empty list since we don't have real Azure connection
+            messages = await self.service_bus.receive_queue_messages(
+                queue_name=queue,
+                max_wait_time=1
+            )
+            return messages or []
+            
+        except Exception as e:
+            logger.debug(f"No messages available from queue {queue}: {str(e)}")
             return []
 
     async def start_health_monitor(self):
@@ -253,13 +373,13 @@ class AIRateLockSystem:
             except Exception as e:
                 logger.error(f"❌ Error cleaning up {agent_name}: {str(e)}")
         
-        # Close Service Bus connections
+        # Clean up any remaining Service Bus credentials to prevent session warnings
         if self.service_bus:
             try:
-                await self.service_bus.close()
-                logger.info("✅ Service Bus connections closed")
+                await self.service_bus.cleanup_all_credentials()
             except Exception as e:
-                logger.error(f"❌ Error closing Service Bus: {str(e)}")
+                logger.debug(f"Error during credential cleanup: {e}")
+            logger.info("✅ Service Bus operations closed")
         
         shutdown_time = datetime.now()
         total_runtime = shutdown_time - self.startup_time

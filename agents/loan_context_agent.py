@@ -211,3 +211,8 @@ class LoanApplicationContextAgent:
         except Exception as e:
             logger.error(f"Error updating loan lock status: {str(e)}")
             return False
+    
+    async def close(self):
+        """Clean up agent resources."""
+        # Note: los_service cleanup would be handled by the service itself if needed
+        logger.info(f"{self.agent_name}: Resources cleaned up.")
