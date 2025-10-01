@@ -179,6 +179,96 @@ class RateQuoteAgent:
         except Exception as e:
             logger.error(f"Failed to send exception alert: {str(e)}")
 
+    async def process_rate_quote_request(self, rate_lock_id: str):
+        """
+        Demo method to process a rate quote request.
+        Returns rate quote information for demo purposes.
+        """
+        # Try to initialize kernel, but continue in demo mode if it fails
+        try:
+            await self._initialize_kernel()
+            ai_available = True
+        except Exception as e:
+            logger.warning(f"AI services unavailable for demo: {str(e)}")
+            print(f"      ⚠️  Running in demo mode without AI services")
+            ai_available = False
+        
+        try:
+            print(f"      💰 Generating rate quotes for rate lock: {rate_lock_id}")
+            
+            # Simulate rate calculation process
+            await asyncio.sleep(1)  # Simulate processing time
+            
+            # Generate mock rate quotes
+            import random
+            base_rate = 6.5 + random.uniform(-0.5, 0.5)
+            
+            rate_options = [
+                {
+                    "lock_period_days": 15,
+                    "rate": round(base_rate - 0.125, 3),
+                    "points": 0.5,
+                    "monthly_payment": 2845.67
+                },
+                {
+                    "lock_period_days": 30,
+                    "rate": round(base_rate, 3),
+                    "points": 0.0,
+                    "monthly_payment": 2891.23
+                },
+                {
+                    "lock_period_days": 45,
+                    "rate": round(base_rate + 0.125, 3),
+                    "points": -0.5,
+                    "monthly_payment": 2936.89
+                }
+            ]
+            
+            result = {
+                "rate_lock_id": rate_lock_id,
+                "status": "RATES_PRESENTED",
+                "rate_options": rate_options,
+                "generated_timestamp": datetime.now().isoformat(),
+                "expires_at": (datetime.now().timestamp() + 86400)  # 24 hours
+            }
+            
+            print(f"      ✅ Generated {len(rate_options)} rate options")
+            for option in rate_options:
+                print(f"         📊 {option['lock_period_days']} days: {option['rate']}% rate, {option['points']} points")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in process_rate_quote_request demo: {str(e)}")
+            print(f"      ❌ Error generating rate quotes: {str(e)}")
+            return None
+
+    def get_agent_status(self):
+        """
+        Returns the current status of the rate quote agent.
+        """
+        return {
+            "agent_name": self.agent_name,
+            "session_id": self.session_id,
+            "initialized": self._initialized,
+            "processing": self._is_processing,
+            "status": "READY" if self._initialized else "INITIALIZING"
+        }
+
+    async def register_for_workflow_messages(self):
+        """
+        Demo method to simulate registering for workflow messages.
+        Returns True to indicate successful registration.
+        """
+        try:
+            print(f"      📡 Registering {self.agent_name} for workflow messages...")
+            await asyncio.sleep(0.5)  # Simulate registration time
+            print(f"      ✅ Successfully registered for Service Bus messages")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to register for workflow messages: {str(e)}")
+            return False
+
     async def close(self):
         if self._initialized:
             if self.cosmos_plugin: await self.cosmos_plugin.close()

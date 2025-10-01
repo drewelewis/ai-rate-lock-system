@@ -62,7 +62,7 @@
         }
     },
     "triggers": {
-        "When_a_message_is_received_in_a_Service_Bus_topic_(peek-lock)": {
+        "When_a_message_is_received_in_a_Service_Bus_queue_(peek-lock)": {
             "type": "ApiConnection",
             "inputs": {
                 "host": {
@@ -71,10 +71,7 @@
                     }
                 },
                 "method": "get",
-                "path": "/@{encodeURIComponent(encodeURIComponent('outbound-email-notifications'))}/subscriptions/@{encodeURIComponent('send-email-subscription')}/messages/head",
-                "queries": {
-                    "subscriptionType": "Main"
-                }
+                "path": "/@{encodeURIComponent(encodeURIComponent('outbound-email-queue'))}/messages/head"
             },
             "recurrence": {
                 "frequency": "Minute",
@@ -86,20 +83,6 @@
         "$connections": {
             "defaultValue": {},
             "type": "Object"
-        }
-    },
-    "connectionReferences": {
-        "office365": {
-            "connectionId": "[parameters('office365_connection_id')]",
-            "id": "[parameters('office365_connection_resource_id')]",
-            "connectionName": "office365",
-            "type": "Microsoft.Web/connections"
-        },
-        "servicebus": {
-            "connectionId": "[parameters('servicebus_connection_id')]",
-            "id": "[parameters('servicebus_connection_resource_id')]",
-            "connectionName": "servicebus",
-            "type": "Microsoft.Web/connections"
         }
     }
 }

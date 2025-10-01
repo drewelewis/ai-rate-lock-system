@@ -15,7 +15,7 @@
                     "ContentData": "@{base64(json(concat('{\"message_type\":\"new_email_request\", \"loan_application_id\": \"', triggerBody()?['subject'], '\", \"email_body\": \"', triggerBody()?['body'], '\", \"from_address\": \"', triggerBody()?['from'], '\"}')))}",
                     "ContentType": "application/json"
                 },
-                "path": "/@{encodeURIComponent(encodeURIComponent('new-email-requests'))}/messages"
+                "path": "/@{encodeURIComponent(encodeURIComponent('inbound-email-queue'))}/messages"
             },
             "runAfter": {}
         }
@@ -48,20 +48,6 @@
         "$connections": {
             "defaultValue": {},
             "type": "Object"
-        }
-    },
-    "connectionReferences": {
-        "office365": {
-            "connectionId": "[parameters('office365_connection_id')]",
-            "id": "[parameters('office365_connection_resource_id')]",
-            "connectionName": "office365",
-            "type": "Microsoft.Web/connections"
-        },
-        "servicebus": {
-            "connectionId": "[parameters('servicebus_connection_id')]",
-            "id": "[parameters('servicebus_connection_resource_id')]",
-            "connectionName": "servicebus",
-            "type": "Microsoft.Web/connections"
         }
     }
 }

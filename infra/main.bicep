@@ -78,30 +78,23 @@ module monitoring 'core/monitor/monitoring.bicep' = {
   }
 }
 
-resource office365Connection 'Microsoft.Web/connections@2016-06-01' = {
-  name: 'office365'
-  location: location
-  properties: {
-    displayName: 'Office365'
-    customParameterValues: {}
-    api: {
-      id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'office365')
-    }
+module apiConnections 'core/host/api-connections.bicep' = {
+  name: 'api-connections'
+  params: {
+    location: location
+    tags: tags
   }
 }
 
-resource serviceBusConnection 'Microsoft.Web/connections@2016-06-01' = {
-  name: 'servicebus'
-  location: location
-  properties: {
-    displayName: 'ServiceBus'
-    customParameterValues: {}
-    api: {
-      id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'servicebus')
-    }
-    parameterValues: {
-      connectionString: serviceBus.outputs.connectionString
-    }
+// Deploy Service Bus connection with managed identity support using ARM template
+// This is required because Service Bus is a multi-authentication connector that needs
+// parameterValueSet with "managedIdentityAuth" which Bicep doesn't yet support
+module serviceBusConnectionV2 './servicebus-managed-identity-connection.json' = {
+  name: 'servicebus-connection-v2'
+  params: {
+    location: location
+    connectionName: 'servicebus-v2'
+    serviceBusNamespaceName: serviceBusNamespaceName
   }
 }
 
@@ -131,8 +124,19 @@ module workflows 'workflows.bicep' = {
   name: 'workflows'
   params: {
     location: location
-    office365ApiConnectionId: office365Connection.id
-    serviceBusApiConnectionId: serviceBusConnection.id
+    office365ApiConnectionId: apiConnections.outputs.office365ConnectionId
+    serviceBusApiConnectionId: serviceBusConnectionV2.outputs.connectionId
+  }
+}
+
+module roleAssignments 'core/security/role-assignments.bicep' = {
+  name: 'role-assignments'
+  params: {
+    serviceBusNamespaceName: serviceBusNamespaceName
+    logicAppPrincipalIds: [
+      workflows.outputs.inboundLogicAppPrincipalId
+      workflows.outputs.outboundLogicAppPrincipalId
+    ]
   }
 }
 
@@ -150,5 +154,5 @@ output AZURE_SERVICEBUS_NAMESPACE_NAME string = serviceBusNamespaceName
 output AZURE_SERVICEBUS_ENDPOINT string = serviceBus.outputs.endpoint
 output AZURE_LOG_ANALYTICS_WORKSPACE_NAME string = logAnalyticsWorkspaceName
 output AZURE_APPLICATION_INSIGHTS_NAME string = applicationInsightsName
-output OFFICE365_CONNECTION_ID string = office365Connection.id
-output SERVICEBUS_CONNECTION_ID string = serviceBusConnection.id
+output OFFICE365_CONNECTION_ID string = apiConnections.outputs.office365ConnectionId
+output SERVICEBUS_CONNECTION_ID string = serviceBusConnectionV2.outputs.connectionId

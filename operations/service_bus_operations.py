@@ -7,16 +7,19 @@ import os
 import json
 from typing import Dict, Any, List, Optional
 import asyncio
-from azure.servicebus.aio import ServiceBusClient, ServiceBusMessage
+from azure.servicebus.aio import ServiceBusClient
+from azure.servicebus import ServiceBusMessage
 from azure.identity.aio import DefaultAzureCredential
 from utils.logger import console_info, console_debug, console_warning, console_error, console_telemetry_event
+from config.azure_config import AzureConfig
 
 class ServiceBusOperations:
     def __init__(self):
         """
         Initialize the ServiceBusOperations class.
         """
-        self.servicebus_namespace = os.getenv('AZURE_SERVICEBUS_NAMESPACE')
+        self.azure_config = AzureConfig()
+        self.servicebus_namespace = self.azure_config.get_servicebus_namespace()
         self.credential = None
         self.client = None
         
@@ -41,7 +44,7 @@ class ServiceBusOperations:
         if self.client is None:
             try:
                 if not self.servicebus_namespace:
-                    raise ValueError("AZURE_SERVICEBUS_NAMESPACE environment variable is required")
+                    raise ValueError("AZURE_SERVICEBUS_NAMESPACE_NAME environment variable is required")
                 
                 self.credential = DefaultAzureCredential()
                 fully_qualified_namespace = f"{self.servicebus_namespace}.servicebus.windows.net"
@@ -95,6 +98,53 @@ class ServiceBusOperations:
         except Exception as e:
             console_error(f"Failed to send message to topic '{topic_name}': {e}", "ServiceBusOps")
             return False
+
+    async def receive_messages(self, topic_name: str, subscription_name: str, max_wait_time: int = 5) -> List[Dict[str, Any]]:
+        """
+        Receive messages from a Service Bus topic subscription.
+        
+        Args:
+            topic_name: Name of the topic to receive from
+            subscription_name: Name of the subscription
+            max_wait_time: Maximum time to wait for messages in seconds
+            
+        Returns:
+            List of received messages as dictionaries
+        """
+        try:
+            # Try to initialize client if not already done
+            if not self.client:
+                try:
+                    await self._get_servicebus_client()
+                except Exception as e:
+                    console_warning(f"Service Bus client initialization failed: {e}", "ServiceBusOps")
+                    return []
+            
+            console_debug(f"Checking for messages from {topic_name}/{subscription_name}", "ServiceBusOps")
+            
+            # In production, this would actually receive from Service Bus
+            # For now, return empty list since we don't have real Azure connection
+            # 
+            # receiver = self.client.get_subscription_receiver(
+            #     topic_name=topic_name,
+            #     subscription_name=subscription_name
+            # )
+            # 
+            # received_msgs = receiver.receive_messages(max_wait_time=max_wait_time)
+            # messages = []
+            # for msg in received_msgs:
+            #     message_body = json.loads(str(msg))
+            #     messages.append(message_body)
+            #     receiver.complete_message(msg)
+            # 
+            # return messages
+            
+            # Return empty list for demo mode
+            return []
+            
+        except Exception as e:
+            console_warning(f"Error receiving messages from {topic_name}/{subscription_name}: {e}", "ServiceBusOps")
+            return []
 
     async def close(self):
         """

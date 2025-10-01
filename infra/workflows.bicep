@@ -27,12 +27,17 @@ resource inboundEmailProcessor 'Microsoft.Logic/workflows@2019-05-01' = {
           office365: {
             connectionId: office365ApiConnectionId
             connectionName: 'office365'
-            id: office365ApiConnectionId
+            id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'office365')
           }
           servicebus: {
             connectionId: serviceBusApiConnectionId
-            connectionName: 'servicebus'
-            id: serviceBusApiConnectionId
+            connectionName: 'servicebus-v2'
+            id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'servicebus')
+            connectionProperties: {
+              authentication: {
+                type: 'ManagedServiceIdentity'
+              }
+            }
           }
         }
       }
@@ -54,15 +59,23 @@ resource outboundEmailSender 'Microsoft.Logic/workflows@2019-05-01' = {
           office365: {
             connectionId: office365ApiConnectionId
             connectionName: 'office365'
-            id: office365ApiConnectionId
+            id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'office365')
           }
           servicebus: {
             connectionId: serviceBusApiConnectionId
-            connectionName: 'servicebus'
-            id: serviceBusApiConnectionId
+            connectionName: 'servicebus-v2'
+            id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'servicebus')
+            connectionProperties: {
+              authentication: {
+                type: 'ManagedServiceIdentity'
+              }
+            }
           }
         }
       }
     }
   }
 }
+
+output inboundLogicAppPrincipalId string = inboundEmailProcessor.identity.principalId
+output outboundLogicAppPrincipalId string = outboundEmailSender.identity.principalId

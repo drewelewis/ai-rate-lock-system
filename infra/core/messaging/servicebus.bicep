@@ -26,10 +26,45 @@ resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2021-11-01' = {
   }
 }
 
-// Main workflow topic for agent coordination events
+// Queues for Logic Apps direct communication
+resource inboundEmailQueue 'Microsoft.ServiceBus/namespaces/queues@2021-11-01' = {
+  parent: serviceBusNamespace
+  name: 'inbound-email-queue'
+  properties: {
+    maxMessageSizeInKilobytes: 256
+    defaultMessageTimeToLive: 'P1D' // 1 day
+    maxSizeInMegabytes: 1024
+    duplicateDetectionHistoryTimeWindow: 'PT10M' // 10 minutes
+    requiresDuplicateDetection: false
+    enablePartitioning: false
+    lockDuration: 'PT1M'
+    maxDeliveryCount: 10
+    deadLetteringOnMessageExpiration: false
+    enableBatchedOperations: true
+  }
+}
+
+resource outboundEmailQueue 'Microsoft.ServiceBus/namespaces/queues@2021-11-01' = {
+  parent: serviceBusNamespace
+  name: 'outbound-email-queue'
+  properties: {
+    maxMessageSizeInKilobytes: 256
+    defaultMessageTimeToLive: 'P1D' // 1 day
+    maxSizeInMegabytes: 1024
+    duplicateDetectionHistoryTimeWindow: 'PT10M'
+    requiresDuplicateDetection: false
+    enablePartitioning: false
+    lockDuration: 'PT1M'
+    maxDeliveryCount: 10
+    deadLetteringOnMessageExpiration: false
+    enableBatchedOperations: true
+  }
+}
+
+// Topics for internal agent coordination (separate from Logic Apps queues)
 resource workflowTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
   parent: serviceBusNamespace
-  name: 'workflow-events'
+  name: 'agent-workflow'
   properties: {
     maxMessageSizeInKilobytes: 256
     defaultMessageTimeToLive: 'P1D' // 1 day
@@ -44,7 +79,7 @@ resource workflowTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
 // Audit topic for comprehensive logging
 resource auditTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
   parent: serviceBusNamespace
-  name: 'audit-events'
+  name: 'audit-logging'
   properties: {
     maxMessageSizeInKilobytes: 256
     defaultMessageTimeToLive: 'P7D' // 7 days
@@ -179,10 +214,10 @@ resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = i
   }
 }
 
+output serviceBusEndpoint string = serviceBusNamespace.properties.serviceBusEndpoint
 output endpoint string = 'https://${serviceBusNamespace.name}.servicebus.windows.net'
 output namespaceName string = serviceBusNamespace.name
 output id string = serviceBusNamespace.id
-output endpoint string = serviceBusNamespace.properties.serviceBusEndpoint
 
 var rootManageSharedAccessKeyName = 'RootManageSharedAccessKey'
 

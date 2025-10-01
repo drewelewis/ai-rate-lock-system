@@ -140,6 +140,126 @@ class EmailIntakeAgent:
             logger.error(error_msg)
             await self._send_exception_alert("TECHNICAL_ERROR", "high", error_msg, message.get('loan_application_id', 'unknown'))
 
+    async def process_inbox(self):
+        """
+        Demo method to simulate processing inbound email queue messages.
+        Returns a list of processed rate lock requests for demo purposes.
+        """
+        # Try to initialize kernel, but continue in demo mode if it fails
+        try:
+            await self._initialize_kernel()
+            ai_available = True
+        except Exception as e:
+            logger.warning(f"AI services unavailable for demo: {str(e)}")
+            print(f"   ⚠️  Running in demo mode without AI services")
+            ai_available = False
+        
+        # Simulate inbound email messages that would come from Service Bus
+        sample_messages = [
+            {
+                "message_type": "new_email_request",
+                "loan_application_id": "LA123456",
+                "email_body": "Hello, I would like to lock the rate for loan LA123456 for 45 days. The property is at 123 Main St, Anytown, USA. Please confirm. Best regards, John Doe",
+                "from_address": "john.doe@email.com"
+            },
+            {
+                "message_type": "new_email_request", 
+                "loan_application_id": "LA789012",
+                "email_body": "Rate lock request for loan LA789012. Need 30 day lock for property at 456 Oak Ave. Thanks, Jane Smith",
+                "from_address": "jane.smith@email.com"
+            }
+        ]
+        
+        processed_requests = []
+        
+        try:
+            print(f"📨 Processing {len(sample_messages)} simulated email messages...")
+            
+            for i, message in enumerate(sample_messages, 1):
+                print(f"   📧 Processing message {i}/{len(sample_messages)} from {message['from_address']}")
+                
+                # Process the message
+                loan_application_id = message.get('loan_application_id')
+                email_body = message.get('email_body')
+                from_address = message.get('from_address')
+                
+                if ai_available:
+                    # Extract data using AI
+                    try:
+                        extraction_result_str = await self.kernel.invoke(
+                            self.kernel.plugins["email_parser"]["extract_loan_data_from_email"],
+                            email_body=email_body,
+                            subject_loan_id=loan_application_id
+                        )
+                        extracted_data = json.loads(str(extraction_result_str))
+                    except Exception as e:
+                        logger.warning(f"AI extraction failed, using fallback: {str(e)}")
+                        extracted_data = self._fallback_extract_data(email_body, loan_application_id)
+                else:
+                    # Use fallback extraction for demo
+                    extracted_data = self._fallback_extract_data(email_body, loan_application_id)
+                
+                print(f"   🤖 Extracted: Loan {extracted_data.get('loan_application_id')}, {extracted_data.get('requested_lock_period_days')} days")
+                
+                # Create rate lock record
+                rate_lock_record = {
+                    "rate_lock_id": f"RL{datetime.now().strftime('%Y%m%d%H%M%S')}{i:02d}",
+                    "loan_application_id": extracted_data.get("loan_application_id", loan_application_id),
+                    "borrower_email": from_address,
+                    "status": "PENDING_QUOTE",
+                    "requested_lock_period_days": extracted_data.get("requested_lock_period_days", 30),
+                    "borrower_name": extracted_data.get("borrower_name", "Unknown"),
+                    "property_address": extracted_data.get("property_address", "Unknown"),
+                    "created_timestamp": datetime.now().isoformat(),
+                    "updated_timestamp": datetime.now().isoformat()
+                }
+                
+                # Store in Cosmos DB (simulated for demo)
+                print(f"   💾 Creating rate lock record: {rate_lock_record['rate_lock_id']}")
+                
+                # Add to processed list
+                processed_requests.append(rate_lock_record)
+                
+                print(f"   ✅ Message processed successfully")
+                
+                # Small delay to simulate processing time
+                await asyncio.sleep(0.5)
+                
+        except Exception as e:
+            logger.error(f"Error in process_inbox demo: {str(e)}")
+            print(f"   ❌ Error processing messages: {str(e)}")
+        
+        return processed_requests
+    
+    def _fallback_extract_data(self, email_body: str, subject_loan_id: str):
+        """
+        Fallback data extraction without AI for demo purposes.
+        """
+        import re
+        
+        # Try to find a loan ID in the body first
+        loan_id_match = re.search(r'LA\d{5,}', email_body, re.IGNORECASE)
+        loan_id = loan_id_match.group() if loan_id_match else subject_loan_id
+        
+        # Extract lock period
+        lock_period_match = re.search(r'(\d+)\s*day', email_body, re.IGNORECASE)
+        lock_period = int(lock_period_match.group(1)) if lock_period_match else 30
+        
+        # Extract name (simple heuristic)
+        name_match = re.search(r'(Best regards|Thanks|Sincerely),?\s*([A-Z][a-z]+\s+[A-Z][a-z]+)', email_body)
+        borrower_name = name_match.group(2) if name_match else "Unknown Borrower"
+        
+        # Extract address (simple heuristic)  
+        address_match = re.search(r'(\d+\s+[A-Za-z\s]+(?:St|Ave|Rd|Blvd|Dr)[^.]*)', email_body)
+        property_address = address_match.group(1).strip() if address_match else "Address not found"
+        
+        return {
+            "loan_application_id": loan_id,
+            "requested_lock_period_days": lock_period,
+            "borrower_name": borrower_name,
+            "property_address": property_address
+        }
+
     @kernel_function(
         description="Extracts structured loan application data from the body of an email.",
         name="extract_loan_data_from_email"
@@ -224,6 +344,31 @@ class EmailIntakeAgent:
             )
         except Exception as e:
             logger.error(f"Failed to send exception alert: {str(e)}")
+
+    def get_agent_status(self):
+        """
+        Returns the current status of the email intake agent.
+        """
+        return {
+            "agent_name": self.agent_name,
+            "session_id": self.session_id,
+            "initialized": self._initialized,
+            "status": "READY" if self._initialized else "INITIALIZING"
+        }
+
+    async def register_for_workflow_messages(self):
+        """
+        Demo method to simulate registering for workflow messages.
+        Returns True to indicate successful registration.
+        """
+        try:
+            print(f"      📡 Registering {self.agent_name} for workflow messages...")
+            await asyncio.sleep(0.5)  # Simulate registration time
+            print(f"      ✅ Successfully registered for Service Bus messages")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to register for workflow messages: {str(e)}")
+            return False
 
     async def close(self):
         if self._initialized:

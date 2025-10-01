@@ -31,11 +31,11 @@ class AzureConfig:
     
     def get_servicebus_endpoint(self) -> str:
         """Get Service Bus endpoint"""
-        return os.getenv('AZURE_SERVICE_BUS_ENDPOINT')
+        return os.getenv('AZURE_SERVICEBUS_ENDPOINT', os.getenv('AZURE_SERVICE_BUS_ENDPOINT'))
         
     def get_servicebus_namespace(self) -> str:
         """Get Service Bus namespace"""
-        return os.getenv('AZURE_SERVICE_BUS_NAMESPACE')
+        return os.getenv('AZURE_SERVICEBUS_NAMESPACE_NAME', os.getenv('AZURE_SERVICE_BUS_NAMESPACE'))
     
     def get_container_registry(self) -> str:
         """Get Container Registry endpoint"""

@@ -9,9 +9,5 @@ metadata:
 #     language: python
 #     host: containerapp
 
-hooks:
-  postprovision:
-    - shell: pwsh
-      run: |
-        Write-Host "Setting up environment variables..."
-        azd env get-values | Out-File -FilePath .env -Encoding utf8
+# Post-deployment hooks removed - now using full declarative Bicep approach
+# All managed identity configuration is handled directly in Bicep templates
