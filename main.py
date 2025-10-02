@@ -245,8 +245,19 @@ class AIRateLockSystem:
                             
                             # Route message to appropriate agent handler
                             if agent_name == 'email_intake':
-                                # Extract raw message body for LLM processing
-                                message_body = message.get('body', str(message))
+                                # Extract raw message body for LLM processing - FIXED: properly convert generator to string
+                                raw_body = message.get('body', '')
+                                if hasattr(raw_body, '__iter__') and not isinstance(raw_body, str):
+                                    # Convert generator or bytes to string
+                                    try:
+                                        message_body = ''.join(raw_body) if isinstance(raw_body, (list, tuple)) else ''.join(str(chunk) for chunk in raw_body)
+                                    except:
+                                        message_body = str(raw_body)
+                                else:
+                                    message_body = str(raw_body)
+                                    
+                                logger.info(f"📨 {agent_name} message body type: {type(raw_body)} -> {type(message_body)}")
+                                logger.info(f"📨 {agent_name} message preview: {message_body[:100]}...")
                                 await agent_instance.handle_message(message_body)
                             elif agent_name == 'rate_quote':
                                 await agent_instance.handle_message(message)
@@ -417,15 +428,8 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # Set environment variables for production (you'll need to configure these)
-        # os.environ["AZURE_OPENAI_ENDPOINT"] = "your-openai-endpoint"
-        # os.environ["AZURE_OPENAI_API_KEY"] = "your-openai-key" 
-        # os.environ["AZURE_SERVICEBUS_NAMESPACE"] = "your-servicebus-namespace"
-        
-        # For demo purposes, use mock values
-        os.environ["AZURE_OPENAI_ENDPOINT"] = "https://demo-openai.openai.azure.com/"
-        os.environ["AZURE_OPENAI_API_KEY"] = "demo-key-for-testing"
-        os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"] = "gpt-4o"
+        # Environment variables are loaded from .env file by load_dotenv() above
+        # Using real Azure OpenAI endpoint from environment configuration
         
         # Run the async main function
         asyncio.run(main())

@@ -55,8 +55,12 @@ class EmailIntakeAgent:
             endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
             deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
             
+            # EXPLICIT LOGGING - NO HIDING CONFIGURATION ISSUES
+            logger.info(f"{self.agent_name}: 🔧 Azure OpenAI Endpoint: {endpoint}")
+            logger.info(f"{self.agent_name}: 🔧 Deployment Name: {deployment_name}")
+            
             if not all([endpoint, deployment_name]):
-                raise ValueError("Missing Azure OpenAI configuration for Email Intake Agent.")
+                raise ValueError(f"Missing Azure OpenAI configuration: endpoint={endpoint}, deployment={deployment_name}")
 
             # Use managed identity for Azure OpenAI authentication
             from azure.identity.aio import DefaultAzureCredential
@@ -70,7 +74,8 @@ class EmailIntakeAgent:
             azure_chat_service = AzureChatCompletion(
                 deployment_name=deployment_name,
                 endpoint=endpoint,
-                ad_token_provider=get_token
+                ad_token_provider=get_token,
+                service_id="azure_openai_chat"  # Give it a proper service ID
             )
             
             self.kernel.add_service(azure_chat_service)
@@ -93,21 +98,33 @@ class EmailIntakeAgent:
         """Handles a single message from the service bus."""
         await self._initialize_kernel()
         
+        # Enhanced logging for debugging
+        logger.info(f"{self.agent_name}: 🎯 HANDLING NEW MESSAGE")
+        logger.info(f"{self.agent_name}: 📏 Message length: {len(message) if message else 0} characters")
+        logger.info(f"{self.agent_name}: 📋 Message type: {type(message)}")
+        
         try:
             # All messages are raw text that need LLM parsing
             if message and message.strip():
+                logger.info(f"{self.agent_name}: ✅ Message validation passed - proceeding with LLM processing")
                 await self._process_raw_email_with_llm(message)
             else:
-                logger.warning(f"{self.agent_name}: Received empty message")
+                logger.warning(f"{self.agent_name}: ❌ Received empty message")
                 
         except Exception as e:
             error_msg = f"Failed to process message: {str(e)}"
-            logger.error(error_msg)
+            logger.error(f"{self.agent_name}: 🚨 {error_msg}")
             await self._send_exception_alert("TECHNICAL_ERROR", "high", error_msg, "unknown")
 
     async def _process_raw_email_with_llm(self, raw_email_content: str):
         """Process raw email content using LLM for intelligent parsing."""
         logger.info(f"{self.agent_name}: Processing raw email content with LLM")
+        
+        # Log the raw input message for debugging
+        logger.info(f"{self.agent_name}: 📨 RAW INPUT MESSAGE:")
+        logger.info(f"{self.agent_name}: {'-'*50}")
+        logger.info(f"{self.agent_name}: {raw_email_content[:500]}{'...' if len(raw_email_content) > 500 else ''}")
+        logger.info(f"{self.agent_name}: {'-'*50}")
         
         try:
             # Call Azure OpenAI directly to parse the email content
@@ -137,8 +154,8 @@ class EmailIntakeAgent:
             # Store in Cosmos DB using the correct method and parameters
             await self.cosmos_plugin.create_rate_lock(
                 loan_application_id=loan_application_id,
-                borrower_name=extracted_data.get('borrower_name', 'Unknown'),
-                borrower_email=from_address,
+                borrower_name=extracted_data.get('borrower_name'),  # NO FALLBACKS - must be extracted by LLM
+                borrower_email=from_address,  # NO FALLBACKS - must exist
                 borrower_phone=extracted_data.get('contact_phone', ''),
                 property_address=extracted_data.get('property_address', ''),
                 requested_lock_period=str(extracted_data.get('requested_lock_period_days', 30)),
@@ -152,9 +169,9 @@ class EmailIntakeAgent:
             
         except Exception as e:
             error_msg = f"Failed to process raw email with LLM: {str(e)}"
-            logger.error(error_msg)
-            # Send to exception handler
-            await self._send_exception_alert("EMAIL_PROCESSING_FAILED", "HIGH", error_msg, "UNKNOWN")
+            logger.error(f"{self.agent_name}: 🚨 CRITICAL ERROR - NO FALLBACKS: {error_msg}")
+            # Re-raise to surface the real issue
+            raise
 
     async def _extract_loan_data_with_llm(self, email_content: str) -> dict:
         """Direct LLM call to extract loan data from email content."""
@@ -189,15 +206,14 @@ JSON:"""
             import random
             from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
             
-            # Get the chat completion service directly
-            chat_service = self.kernel.get_service(AzureChatCompletion)
+            logger.info(f"{self.agent_name}: 🤖 Making LLM call to Azure OpenAI...")
+            logger.info(f"{self.agent_name}: 📝 Prompt length: {len(prompt)} characters")
             
-            # Create the completion request
-            response = await chat_service.get_chat_message_content(
-                chat_history=[],
-                settings=None,
-                prompt=prompt
-            )
+            # Use kernel to invoke prompt directly - simpler and more reliable
+            response = await self.kernel.invoke_prompt(prompt)
+            
+            logger.info(f"{self.agent_name}: ✅ LLM call completed successfully")
+            logger.info(f"{self.agent_name}: 📤 LLM Response type: {type(response)}")
             
             # Extract and clean the response
             extracted_json = str(response).strip()
@@ -212,29 +228,20 @@ JSON:"""
             # Parse the JSON
             parsed_data = json.loads(extracted_json)
             
-            # Ensure required fields exist with fallbacks
+            # Validate required fields - NO FALLBACKS
             if not parsed_data.get('loan_application_id') or parsed_data.get('loan_application_id') in [None, "", "null"]:
-                fallback_id = f"APP-{random.randint(100000, 999999)}"
-                parsed_data['loan_application_id'] = fallback_id
-                logger.info(f"Generated fallback loan application ID: {fallback_id}")
+                raise ValueError(f"LLM failed to extract loan_application_id from email. Raw response: {extracted_json}")
             
             logger.info(f"LLM successfully extracted loan ID: {parsed_data.get('loan_application_id')}")
             return parsed_data
             
         except Exception as e:
-            logger.error(f"LLM extraction failed: {e}, using fallback")
-            # Simple fallback if LLM fails
-            return {
-                "loan_application_id": f"APP-{random.randint(100000, 999999)}",
-                "borrower_name": None,
-                "property_address": None,
-                "loan_amount": None,
-                "requested_lock_period_days": 30,
-                "contact_phone": None,
-                "contact_email": None,
-                "property_type": None,
-                "loan_purpose": None
-            }
+            logger.error(f"{self.agent_name}: 🚨 LLM extraction failed: {str(e)}")
+            logger.error(f"{self.agent_name}: 🚨 Exception type: {type(e).__name__}")
+            logger.error(f"{self.agent_name}: 🚨 Full error details: {repr(e)}")
+            
+            # NO FALLBACKS - Re-raise the exception to surface the real issue
+            raise Exception(f"LLM extraction failed and no fallbacks allowed: {str(e)}") from e
 
     def _extract_email_address(self, raw_email: str) -> str:
         """Extract 'From' email address from raw email content."""

@@ -263,8 +263,21 @@ class ServiceBusOperations:
                 
                 for msg in received_msgs:
                     try:
-                        # Parse message body - handle empty or non-JSON messages
-                        body_str = str(msg.body) if msg.body else ""
+                        # Parse message body - FIXED: properly extract content from generator
+                        if msg.body:
+                            # Handle generator objects properly
+                            if hasattr(msg.body, '__iter__') and not isinstance(msg.body, (str, bytes)):
+                                try:
+                                    # Convert generator to actual content
+                                    body_parts = list(msg.body)
+                                    body_str = ''.join(part.decode('utf-8') if isinstance(part, bytes) else str(part) for part in body_parts)
+                                except Exception as e:
+                                    console_warning(f"Failed to extract body from generator: {e}, falling back to str()", "ServiceBusOps")
+                                    body_str = str(msg.body)
+                            else:
+                                body_str = msg.body.decode('utf-8') if isinstance(msg.body, bytes) else str(msg.body)
+                        else:
+                            body_str = ""
                         
                         if body_str:
                             try:
@@ -353,15 +366,24 @@ class ServiceBusOperations:
                 
                 for msg in received_msgs:
                         try:
-                            # Parse message body - handle empty or non-JSON messages
+                            # Parse message body - FIXED: properly extract content from generator
                             if msg.body:
-                                # Handle different body types - Service Bus SDK might return string or bytes
+                                # Handle different body types - Service Bus SDK might return string, bytes, or generator
                                 if isinstance(msg.body, bytes):
                                     body_str = msg.body.decode('utf-8')
                                     console_debug(f"Message {msg.message_id} decoded from bytes, length: {len(body_str)}", "ServiceBusOps")
                                 elif isinstance(msg.body, str):
                                     body_str = msg.body
                                     console_debug(f"Message {msg.message_id} already string, length: {len(body_str)}", "ServiceBusOps")
+                                elif hasattr(msg.body, '__iter__'):
+                                    # Handle generator objects properly
+                                    try:
+                                        body_parts = list(msg.body)
+                                        body_str = ''.join(part.decode('utf-8') if isinstance(part, bytes) else str(part) for part in body_parts)
+                                        console_debug(f"Message {msg.message_id} extracted from generator, length: {len(body_str)}", "ServiceBusOps")
+                                    except Exception as e:
+                                        console_warning(f"Failed to extract body from generator: {e}, falling back to str()", "ServiceBusOps")
+                                        body_str = str(msg.body)
                                 else:
                                     body_str = str(msg.body)
                                     console_debug(f"Message {msg.message_id} converted to string from {type(msg.body)}, length: {len(body_str)}", "ServiceBusOps")
@@ -467,6 +489,114 @@ Timestamp: {datetime.utcnow().isoformat()}"""
         except Exception as e:
             console_error(f"Failed to send exception alert: {e}", "ServiceBusOps")
             return False
+
+    async def send_message_to_topic(self, topic_name: str, message_body: str, correlation_id: Optional[str] = None) -> bool:
+        """
+        Send a message to a specific Service Bus topic (alias for send_message with topic type).
+        
+        Args:
+            topic_name (str): The logical name of the topic to send the message to
+            message_body (str): The message payload as raw text
+            correlation_id (str, optional): A correlation ID for tracking
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        return await self.send_message(
+            destination_name=topic_name,
+            message_body=message_body,
+            correlation_id=correlation_id,
+            destination_type="topic"
+        )
+
+    async def send_audit_message(self, agent_name: str, action: str, loan_application_id: str, audit_data: Dict[str, Any]) -> bool:
+        """
+        Send an audit message to the audit logging topic.
+        
+        Args:
+            agent_name (str): Name of the agent performing the action
+            action (str): Action being performed 
+            loan_application_id (str): Associated loan application ID
+            audit_data (Dict[str, Any]): Audit details as dictionary
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Create audit message
+            audit_message = {
+                "agent_name": agent_name,
+                "action": action,
+                "loan_application_id": loan_application_id,
+                "audit_data": audit_data,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
+            # Send to audit logging topic
+            return await self.send_message(
+                destination_name="audit_logging",
+                message_body=json.dumps(audit_message),
+                correlation_id=loan_application_id,
+                destination_type="topic"
+            )
+            
+        except Exception as e:
+            console_error(f"Failed to send audit message: {e}", "ServiceBusOps")
+            return False
+
+    async def send_audit_log(self, agent_name: str, action: str, loan_application_id: str, audit_data: Dict[str, Any]) -> bool:
+        """
+        Send an audit log message to the audit logging topic (alias for send_audit_message).
+        
+        Args:
+            agent_name (str): Name of the agent performing the action
+            action (str): Action being performed 
+            loan_application_id (str): Associated loan application ID
+            audit_data (Dict[str, Any]): Audit details as dictionary
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        return await self.send_audit_message(agent_name, action, loan_application_id, audit_data)
+
+    async def send_message_to_topic(self, topic_name: str, message_body: str, correlation_id: str = None) -> bool:
+        """
+        Send a message to a specific topic.
+        
+        Args:
+            topic_name (str): Name of the topic
+            message_body (str): Message content
+            correlation_id (str, optional): Correlation ID for message tracking
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        return await self.send_message(
+            destination_name=topic_name,
+            message_body=message_body,
+            correlation_id=correlation_id,
+            destination_type="topic"
+        )
+
+    async def send_audit_message(self, agent_name: str, action: str, loan_application_id: str = None, audit_data: dict = None) -> bool:
+        """
+        Simplified audit message sending for backward compatibility.
+        
+        Args:
+            agent_name (str): Name of the agent sending the audit
+            action (str): Action being audited
+            loan_application_id (str, optional): Associated loan application ID
+            audit_data (dict, optional): Additional audit data
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        return await self.send_audit_log(
+            agent_name=agent_name,
+            action=action,
+            loan_application_id=loan_application_id or "unknown",
+            audit_data=audit_data or {}
+        )
 
     # Note: No close() method needed since we use per-operation clients
     # Each method creates its own client and properly disposes it via async context managers

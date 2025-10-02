@@ -242,6 +242,40 @@ class ServiceBusPlugin:
             self._send_friendly_notification(f"❌ Error sending exception alert")
             return {"success": False, "error": str(e)}
 
+    async def send_message_to_topic(self, topic_name: str, message_body: str, correlation_id: str = None) -> bool:
+        """
+        Send a message to a specific Service Bus topic.
+        
+        Args:
+            topic_name (str): Name of the topic to send to
+            message_body (str): Message content
+            correlation_id (str, optional): Correlation ID for tracking
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            self._log_function_call("send_message_to_topic", topic_name=topic_name, correlation_id=correlation_id)
+            self._send_friendly_notification(f"📨 Sending message to topic: {topic_name}...")
+            
+            success = await servicebus_operations.send_message_to_topic(
+                topic_name=topic_name,
+                message_body=message_body,
+                correlation_id=correlation_id
+            )
+            
+            if success:
+                self._send_friendly_notification(f"✅ Message sent to topic successfully")
+            else:
+                self._send_friendly_notification(f"❌ Failed to send message to topic")
+                
+            return success
+            
+        except Exception as e:
+            print(f"❌ Error sending message to topic: {str(e)}")
+            self._send_friendly_notification(f"❌ Error sending message to topic")
+            return False
+
     async def close(self):
         """
         Clean up resources when the plugin is no longer needed.

@@ -229,6 +229,16 @@ resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = i
   }
 }
 
+// Assign Cosmos DB Built-in Data Contributor role to the principal for data plane operations
+resource dataContributorRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = if (!empty(principalId)) {
+  parent: cosmosDbAccount
+  name: guid(cosmosDbAccount.id, principalId, '00000000-0000-0000-0000-000000000002')
+  properties: {
+    roleDefinitionId: '${cosmosDbAccount.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
+    principalId: principalId
+  }
+}
+
 output endpoint string = cosmosDbAccount.properties.documentEndpoint
 output name string = cosmosDbAccount.name
 output databaseName string = databaseName
