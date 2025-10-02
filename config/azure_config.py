@@ -49,25 +49,21 @@ class AzureConfig:
         """Get high priority exceptions queue name"""
         return os.getenv('AZURE_SERVICEBUS_QUEUE_HIGH_PRIORITY_EXCEPTIONS', 'high-priority-exceptions')
     
-    def get_servicebus_topic_agent_workflow(self) -> str:
-        """Get agent workflow topic name"""
-        return os.getenv('AZURE_SERVICEBUS_TOPIC_AGENT_WORKFLOW', 'agent-workflow')
+    def get_servicebus_topic_loan_lifecycle(self) -> str:
+        """Get loan lifecycle events topic name (main workflow coordination)"""
+        return os.getenv('AZURE_SERVICEBUS_TOPIC_LOAN_LIFECYCLE', 'loan-lifecycle-events')
     
     def get_servicebus_topic_audit_events(self) -> str:
-        """Get audit events topic name"""
+        """Get audit events topic name (all audit logging)"""
         return os.getenv('AZURE_SERVICEBUS_TOPIC_AUDIT_EVENTS', 'audit-events')
     
-    def get_servicebus_topic_audit_logging(self) -> str:
-        """Get audit logging topic name"""
-        return os.getenv('AZURE_SERVICEBUS_TOPIC_AUDIT_LOGGING', 'audit-logging')
+    def get_servicebus_topic_compliance_events(self) -> str:
+        """Get compliance events topic name (regulatory notifications)"""
+        return os.getenv('AZURE_SERVICEBUS_TOPIC_COMPLIANCE_EVENTS', 'compliance-events')
     
     def get_servicebus_topic_exception_alerts(self) -> str:
-        """Get exception alerts topic name"""
+        """Get exception alerts topic name (error handling)"""
         return os.getenv('AZURE_SERVICEBUS_TOPIC_EXCEPTION_ALERTS', 'exception-alerts')
-    
-    def get_servicebus_topic_workflow_events(self) -> str:
-        """Get workflow events topic name"""
-        return os.getenv('AZURE_SERVICEBUS_TOPIC_WORKFLOW_EVENTS', 'workflow-events')
     
     def get_container_registry(self) -> str:
         """Get Container Registry endpoint"""

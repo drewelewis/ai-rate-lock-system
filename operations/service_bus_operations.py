@@ -35,11 +35,10 @@ class ServiceBusOperations:
         }
         
         self.topics = {
-            'agent_workflow': self.azure_config.get_servicebus_topic_agent_workflow(),
+            'loan_lifecycle': self.azure_config.get_servicebus_topic_loan_lifecycle(),
             'audit_events': self.azure_config.get_servicebus_topic_audit_events(),
-            'audit_logging': self.azure_config.get_servicebus_topic_audit_logging(),
-            'exception_alerts': self.azure_config.get_servicebus_topic_exception_alerts(),
-            'workflow_events': self.azure_config.get_servicebus_topic_workflow_events()
+            'compliance_events': self.azure_config.get_servicebus_topic_compliance_events(),
+            'exception_alerts': self.azure_config.get_servicebus_topic_exception_alerts()
         }
         
         console_info(f"Service Bus Operations initialized for namespace: {self.servicebus_namespace}", "ServiceBusOps")
@@ -591,12 +590,28 @@ Timestamp: {datetime.utcnow().isoformat()}"""
         Returns:
             bool: True if successful, False otherwise
         """
-        return await self.send_audit_log(
-            agent_name=agent_name,
-            action=action,
-            loan_application_id=loan_application_id or "unknown",
-            audit_data=audit_data or {}
-        )
+        # Create audit message directly to avoid recursion
+        try:
+            # Create audit message
+            audit_message = {
+                "agent_name": agent_name,
+                "action": action,
+                "loan_application_id": loan_application_id or "unknown",
+                "audit_data": audit_data or {},
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
+            # Send to audit logging topic
+            return await self.send_message(
+                destination_name="audit_logging",
+                message_body=json.dumps(audit_message),
+                correlation_id=loan_application_id or "unknown",
+                destination_type="topic"
+            )
+            
+        except Exception as e:
+            console_error(f"Failed to send audit message: {e}", "ServiceBusOps")
+            return False
 
     # Note: No close() method needed since we use per-operation clients
     # Each method creates its own client and properly disposes it via async context managers

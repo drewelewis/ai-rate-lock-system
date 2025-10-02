@@ -242,21 +242,39 @@ class ServiceBusPlugin:
             self._send_friendly_notification(f"❌ Error sending exception alert")
             return {"success": False, "error": str(e)}
 
-    async def send_message_to_topic(self, topic_name: str, message_body: str, correlation_id: str = None) -> bool:
+    async def send_message_to_topic(self, topic_name: str, message_body: str = None, correlation_id: str = None, 
+                                   message_type: str = None, loan_application_id: str = None, message_data: dict = None) -> bool:
         """
         Send a message to a specific Service Bus topic.
         
         Args:
             topic_name (str): Name of the topic to send to
-            message_body (str): Message content
+            message_body (str, optional): Message content (if not provided, will be generated from other params)
             correlation_id (str, optional): Correlation ID for tracking
+            message_type (str, optional): Type of message for workflow coordination
+            loan_application_id (str, optional): Loan application ID for tracking
+            message_data (dict, optional): Additional message data
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            self._log_function_call("send_message_to_topic", topic_name=topic_name, correlation_id=correlation_id)
+            self._log_function_call("send_message_to_topic", topic_name=topic_name, message_type=message_type, loan_application_id=loan_application_id)
             self._send_friendly_notification(f"📨 Sending message to topic: {topic_name}...")
+            
+            # If message_body is not provided, create it from other parameters
+            if not message_body:
+                message_content = {
+                    "message_type": message_type or "workflow_event",
+                    "loan_application_id": loan_application_id or "unknown",
+                    "data": message_data or {},
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                message_body = json.dumps(message_content)
+            
+            # Use loan_application_id as correlation_id if correlation_id not provided
+            if not correlation_id and loan_application_id:
+                correlation_id = loan_application_id
             
             success = await servicebus_operations.send_message_to_topic(
                 topic_name=topic_name,
@@ -274,6 +292,59 @@ class ServiceBusPlugin:
         except Exception as e:
             print(f"❌ Error sending message to topic: {str(e)}")
             self._send_friendly_notification(f"❌ Error sending message to topic")
+            return False
+
+    async def send_message_to_queue(self, queue_name: str, message_body: str = None, correlation_id: str = None, 
+                                   message_type: str = None, loan_application_id: str = None, message_data: dict = None) -> bool:
+        """
+        Send a message to a specific Service Bus queue.
+        
+        Args:
+            queue_name (str): Name of the queue to send to
+            message_body (str, optional): Message content (if not provided, will be generated from other params)
+            correlation_id (str, optional): Correlation ID for tracking
+            message_type (str, optional): Type of message for workflow coordination
+            loan_application_id (str, optional): Loan application ID for tracking
+            message_data (dict, optional): Additional message data
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            self._log_function_call("send_message_to_queue", queue_name=queue_name, message_type=message_type, loan_application_id=loan_application_id)
+            self._send_friendly_notification(f"📨 Sending message to queue: {queue_name}...")
+            
+            # If message_body is not provided, create it from other parameters
+            if not message_body:
+                message_content = {
+                    "message_type": message_type or "queue_message",
+                    "loan_application_id": loan_application_id or "unknown",
+                    "data": message_data or {},
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                message_body = json.dumps(message_content)
+            
+            # Use loan_application_id as correlation_id if correlation_id not provided
+            if not correlation_id and loan_application_id:
+                correlation_id = loan_application_id
+            
+            success = await servicebus_operations.send_message(
+                destination_name=queue_name,
+                message_body=message_body,
+                correlation_id=correlation_id,
+                destination_type='queue'
+            )
+            
+            if success:
+                self._send_friendly_notification(f"✅ Message sent to queue successfully")
+            else:
+                self._send_friendly_notification(f"❌ Failed to send message to queue")
+                
+            return success
+            
+        except Exception as e:
+            print(f"❌ Error sending message to queue: {str(e)}")
+            self._send_friendly_notification(f"❌ Error sending message to queue")
             return False
 
     async def close(self):

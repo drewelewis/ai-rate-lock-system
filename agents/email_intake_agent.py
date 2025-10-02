@@ -422,7 +422,7 @@ JSON:"""
         
         # Send message to the next agent in the workflow
         await self.servicebus_plugin.send_message_to_topic(
-            topic_name="rate_lock_requests",
+            topic_name="loan_lifecycle",
             message_type="context_retrieval_needed", 
             loan_application_id=loan_application_id,
             message_data={"status": "PENDING_CONTEXT"}
@@ -576,8 +576,8 @@ JSON:"""
             "attachments": [] # No attachments for acknowledgment
         }
         
-        await self.servicebus_plugin.send_message_to_topic(
-            topic_name="outbound_email",
+        await self.servicebus_plugin.send_message_to_queue(
+            queue_name="outbound_confirmations",
             message_type="send_email_notification",
             loan_application_id=loan_id,
             message_data=email_payload

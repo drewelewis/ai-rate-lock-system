@@ -143,6 +143,21 @@ resource auditTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
   }
 }
 
+// Exception alerts topic for error handling
+resource exceptionAlertsTopic 'Microsoft.ServiceBus/namespaces/topics@2021-11-01' = {
+  parent: serviceBusNamespace
+  name: 'exception-alerts'
+  properties: {
+    maxMessageSizeInKilobytes: 256
+    defaultMessageTimeToLive: 'P1D' // 1 day
+    maxSizeInMegabytes: 1024
+    duplicateDetectionHistoryTimeWindow: 'PT10M'
+    requiresDuplicateDetection: true
+    enablePartitioning: false
+    supportOrdering: true
+  }
+}
+
 // Agent subscriptions for loan lifecycle events
 resource emailIntakeSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
   parent: loanLifecycleTopic
@@ -247,6 +262,19 @@ resource exceptionHandlerSubscription 'Microsoft.ServiceBus/namespaces/topics/su
   name: 'exception-handler-subscription'
   properties: {
     maxDeliveryCount: 5
+    defaultMessageTimeToLive: 'P1D'
+    lockDuration: 'PT5M'
+    deadLetteringOnMessageExpiration: true
+    deadLetteringOnFilterEvaluationExceptions: true
+  }
+}
+
+// Exception alerts subscriptions
+resource exceptionAlertsMainSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2021-11-01' = {
+  parent: exceptionAlertsTopic
+  name: 'exception-alerts-main-subscription'
+  properties: {
+    maxDeliveryCount: 3
     defaultMessageTimeToLive: 'P1D'
     lockDuration: 'PT5M'
     deadLetteringOnMessageExpiration: true
